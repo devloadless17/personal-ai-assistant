@@ -11,8 +11,10 @@ import type { TenancyService } from '../../tenancy/tenancy.service';
 import type { AgentService } from '../../agent/agent.service';
 import type { ClientScopedRepository } from '../../tenancy/client-scoped-repository';
 
+// A realistic cuid — the controller rejects non-cuid ids before any DB work.
+const CID = 'ckabc123def456ghi789jkl01';
 const CLIENT: Client = {
-  id: 'client-1',
+  id: CID,
   name: 'Test',
   status: 'active',
   timezone: 'UTC',
@@ -70,14 +72,14 @@ describe('TelegramController — webhook authenticity', () => {
   it('rejects a request with the wrong secret token', async () => {
     const { controller, enqueue } = makeController(CLIENT);
     await expect(
-      controller.receive('client-1', 'wrong-secret', makeUpdate()),
+      controller.receive(CID, 'wrong-secret', makeUpdate()),
     ).rejects.toThrow(ForbiddenException);
     expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('rejects a request with no secret header', async () => {
     const { controller, enqueue } = makeController(CLIENT);
-    await expect(controller.receive('client-1', undefined, makeUpdate())).rejects.toThrow(
+    await expect(controller.receive(CID, undefined, makeUpdate())).rejects.toThrow(
       ForbiddenException,
     );
     expect(enqueue).not.toHaveBeenCalled();
@@ -93,14 +95,14 @@ describe('TelegramController — webhook authenticity', () => {
 
   it('acks and enqueues an authentic update', async () => {
     const { controller, enqueue } = makeController(CLIENT);
-    const res = await controller.receive('client-1', 'the-real-secret', makeUpdate());
+    const res = await controller.receive(CID, 'the-real-secret', makeUpdate());
     expect(res).toEqual({ ok: true });
     expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('acks (but does not enqueue) authentic-but-unparsable updates', async () => {
     const { controller, enqueue } = makeController(CLIENT);
-    const res = await controller.receive('client-1', 'the-real-secret', { junk: true });
+    const res = await controller.receive(CID, 'the-real-secret', { junk: true });
     expect(res).toEqual({ ok: true });
     expect(enqueue).not.toHaveBeenCalled();
   });
@@ -120,13 +122,18 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
     const prisma = {
       client: { update: jest.fn().mockResolvedValue(client) },
     } as unknown as PrismaService;
-    const tenancy = { repoFor: () => repo } as unknown as TenancyService;
+    const tenancy = {
+      repoFor: () => repo,
+      // The processor re-loads the client at the start of each update.
+      getActiveClient: jest.fn().mockResolvedValue(client),
+    } as unknown as TenancyService;
     const agent = { respond } as unknown as AgentService;
     const telegram = {
       sendMessage: jest.fn().mockImplementation((_t: string, _c: string, text: string) => {
         sent.push(text);
         return Promise.resolve();
       }),
+      sendTyping: jest.fn().mockResolvedValue(undefined),
     } as unknown as TelegramService;
     const processor = new TelegramUpdateProcessor(prisma, tenancy, agent, telegram, fakeCrypto);
     return { processor, sent, saveMessage, respond };

@@ -21,6 +21,8 @@ export interface ToolContext {
 /** Calendar operations the tools may perform (implemented in Milestone 4). */
 export interface CalendarGateway {
   listEvents(params: { from: Date; to: Date; limit?: number }): Promise<CalendarEvent[]>;
+  /** Fetch one event by id, or null if it doesn't exist / was deleted. */
+  getEvent(eventId: string): Promise<CalendarEvent | null>;
   createEvent(params: {
     title: string;
     start: Date;

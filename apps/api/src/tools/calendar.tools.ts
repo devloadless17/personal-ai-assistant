@@ -154,6 +154,11 @@ export const createCalendarEvent = defineTool({
           reminderLeadMinutes: input.reminder_minutes_before,
         });
         reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before.`;
+      } else {
+        // The lead time is already in the past (e.g. booking a meeting that
+        // starts in under `reminder_minutes_before`). Never claim a reminder we
+        // didn't set — tell the client plainly.
+        reminderNote = ` (The meeting is under ${input.reminder_minutes_before} min away, so I didn't set a separate reminder.)`;
       }
     }
     return `Created on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
@@ -182,18 +187,33 @@ export const updateCalendarEvent = defineTool({
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
-    if (input.start && input.end && input.end <= input.start) {
+    const { event_id, allow_conflict, reminder_minutes_before, start, end, ...rest } = input;
+
+    // A time change may set only start OR only end. To validate the ordering
+    // and re-check conflicts we need BOTH sides, so fetch the current event and
+    // fill in whichever side wasn't provided. Without this, a single-sided move
+    // ("push my 3pm to 4") would skip the conflict gate → silent double-book.
+    const timeChanging = start !== undefined || end !== undefined;
+    let effStart = start;
+    let effEnd = end;
+    if (timeChanging && (start === undefined || end === undefined)) {
+      const current = await ctx.calendar.getEvent(event_id);
+      if (!current) {
+        return `ERROR: no calendar event with id ${event_id} exists. Nothing was changed.`;
+      }
+      effStart = start ?? current.start;
+      effEnd = end ?? current.end;
+    }
+    if (effStart && effEnd && effEnd <= effStart) {
       return 'ERROR: end must be after start. Nothing was changed.';
     }
-    if (input.start && input.end && !input.allow_conflict) {
-      const conflicts = await conflictWarning(ctx, input.start, input.end, input.event_id);
+    if (timeChanging && effStart && effEnd && !allow_conflict) {
+      const conflicts = await conflictWarning(ctx, effStart, effEnd, event_id);
       if (conflicts) {
         return `CONFLICT — nothing was changed. The new time overlaps:\n${conflicts}\nAsk the client whether to pick another time or move anyway (then retry with allow_conflict=true).`;
       }
     }
-    const { event_id, allow_conflict, reminder_minutes_before, start, ...rest } = input;
-    void allow_conflict; // consumed by the conflict gate above
-    const event = await ctx.calendar.updateEvent(event_id, { ...rest, start });
+    const event = await ctx.calendar.updateEvent(event_id, { ...rest, start, end });
 
     // Keep the companion reminder correct: explicit lead wins; otherwise a
     // moved event preserves its existing lead; a title-only edit leaves it be.
@@ -214,6 +234,10 @@ export const updateCalendarEvent = defineTool({
             reminderLeadMinutes: desiredLead,
           });
           reminderNote = ` Reminder set ${desiredLead} min before.`;
+        } else if (event.start.getTime() > ctx.now.getTime()) {
+          // Lead time already past but the event is still upcoming — never drop
+          // the reminder silently; say so plainly so the reply can't imply one.
+          reminderNote = ` (Heads up: ${desiredLead} min before is already past, so I didn't set a separate reminder for it.)`;
         }
       } else if (reminder_minutes_before === 0) {
         reminderNote = ' Reminder removed.';
@@ -232,9 +256,17 @@ export const deleteCalendarEvent = defineTool({
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
+    // Confirm it exists first so "cancel lunch" on an already-removed event
+    // gives a clean, quotable message instead of a raw Google 404/410.
+    const existing = await ctx.calendar.getEvent(input.event_id);
+    if (!existing) {
+      // Still clear any orphaned companion reminder, then report honestly.
+      await ctx.repo.deleteEventReminders(input.event_id);
+      return `ERROR: no calendar event with id ${input.event_id} exists (already removed?). Nothing to delete.`;
+    }
     await ctx.calendar.deleteEvent(input.event_id);
     // Cancel any Telegram reminder tied to this event so it never fires late.
     await ctx.repo.deleteEventReminders(input.event_id);
-    return `Deleted calendar event ${input.event_id}.`;
+    return `Deleted calendar event: ${existing.title}.`;
   },
 });

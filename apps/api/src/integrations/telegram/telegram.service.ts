@@ -58,6 +58,16 @@ export class TelegramService {
     }
   }
 
+  /** Best-effort "typing…" indicator so the client sees the assistant working.
+   * Purely cosmetic — never let it fail or delay the real reply. */
+  async sendTyping(botToken: string, chatId: string | number): Promise<void> {
+    try {
+      await this.call(botToken, 'sendChatAction', { chat_id: chatId, action: 'typing' }, 1);
+    } catch {
+      // ignore — the actual message send is what matters
+    }
+  }
+
   /** Registers the per-client webhook with its secret token. */
   async setWebhook(botToken: string, url: string, secretToken: string): Promise<void> {
     await this.call(botToken, 'setWebhook', {

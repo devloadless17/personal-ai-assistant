@@ -145,10 +145,15 @@ export const updateTask = defineTool({
   async execute(input, ctx) {
     const { task_id, due_at, reminder_at, reminder_minutes_before, ...rest } = input;
 
-    // We may need the existing task to resolve a lead-time or to keep a
-    // reminder's lead when only the due time moves.
+    // We may need the existing task to resolve a lead-time, to keep a
+    // reminder's lead when only the due time moves, OR to honour the
+    // reminder-must-fire guarantee when converting a task to a reminder
+    // (type:'reminder' alone) — then effectiveDue must reflect the STORED due
+    // date, else the guarantee is skipped and the reminder silently never fires.
     const needsExisting =
-      (reminder_minutes_before != null && due_at === undefined) || due_at !== undefined;
+      (reminder_minutes_before != null && due_at === undefined) ||
+      due_at !== undefined ||
+      rest.type === 'reminder';
     const existing = needsExisting ? await ctx.repo.findTaskById(task_id) : null;
 
     const dueRef = due_at !== undefined ? due_at : (existing?.dueAt ?? null);

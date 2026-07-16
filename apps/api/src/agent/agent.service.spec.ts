@@ -412,6 +412,55 @@ describe('AgentService — reliability invariants', () => {
     expect(stateB.audits.every((a) => (a as unknown as { clientId: string }).clientId === 'client-B')).toBe(true);
   });
 
+  it('does NOT correct an honest read-only availability answer ("you\'re all set — nothing booked")', async () => {
+    const { repo, state } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [
+        toolUseResponse('get_calendar_events', {
+          from: '2026-07-16T00:00:00Z',
+          to: '2026-07-17T00:00:00Z',
+        }),
+        textResponse("You're all set tomorrow afternoon — nothing booked."),
+      ],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(2); // NO spurious correction round
+    expect(reply).toContain('nothing booked');
+    expect(state.tasks).toHaveLength(0);
+  });
+
+  it('catches a broader fabrication phrasing ("All done!") with no successful mutation', async () => {
+    const { repo } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [
+        textResponse('All done! Your reminder is set.'), // claims done, no tool ran
+        toolUseResponse('create_task', { title: 'Pray', type: 'reminder' }),
+        textResponse('Done — reminder set.'),
+      ],
+      repo,
+    );
+    await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(3); // correction fired
+  });
+
+  it('anchors offset-less datetime FIELDS to the client zone but leaves date-shaped titles intact', async () => {
+    const { repo, state } = makeFakeRepo();
+    const beirut: Client = { ...CLIENT, timezone: 'Asia/Beirut' };
+    const { agent } = makeAgent(
+      [
+        // Title is literally a date; due_at is an offset-less datetime.
+        toolUseResponse('create_task', { title: '2026-01-01', due_at: '2026-07-16T09:30:00' }),
+        textResponse('Added it.'),
+      ],
+      repo,
+    );
+    await agent.respond(beirut);
+    expect(state.tasks).toHaveLength(1);
+    // Title preserved exactly — NOT rewritten into a timestamp.
+    expect(state.tasks[0]?.title).toBe('2026-01-01');
+  });
+
   it('anthropic API failure returns an honest error, never a fake success', async () => {
     const { repo } = makeFakeRepo();
     const createMessage = jest.fn().mockRejectedValue(new Error('529 overloaded'));

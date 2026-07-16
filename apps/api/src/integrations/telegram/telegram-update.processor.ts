@@ -56,6 +56,17 @@ export class TelegramUpdateProcessor {
   private async process(client: Client, update: TelegramUpdate): Promise<void> {
     const msg = update.message;
     if (!msg || msg.from?.is_bot) return; // nothing actionable
+
+    // Re-load the client from the DB at the start of each (serialized) update,
+    // so a message queued behind a just-completed bind sees the COMMITTED
+    // binding state instead of the stale snapshot captured at webhook time.
+    const fresh = await this.tenancy.getActiveClient(client.id);
+    if (!fresh) {
+      this.logger.warn(`Client ${client.id} no longer active — dropping update ${update.update_id}`);
+      return;
+    }
+    client = fresh;
+
     const botToken = client.telegramBotTokenEnc
       ? this.crypto.decrypt(client.telegramBotTokenEnc)
       : null;
@@ -132,6 +143,9 @@ export class TelegramUpdateProcessor {
       }
       throw err;
     }
+
+    // Show "typing…" while the agent works — makes multi-tool turns feel live.
+    await this.telegram.sendTyping(botToken, chatId);
 
     let reply: string;
     try {

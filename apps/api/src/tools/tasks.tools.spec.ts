@@ -97,6 +97,35 @@ describe('tasks tools — reminder firing guarantee', () => {
     expect(created[0]?.reminderAt).toBeNull();
   });
 
+  it('converting a task to a reminder (type only) arms the ping from its STORED due date', async () => {
+    // The bug: update_task(id, type:'reminder') didn't load the existing task,
+    // so effectiveDue was null and the reminder-must-fire guarantee was skipped.
+    const updates: Record<string, unknown>[] = [];
+    const stored = {
+      id: 'task-9',
+      title: 'Dentist',
+      type: 'task',
+      status: 'open',
+      dueAt: new Date('2026-07-17T15:00:00Z'),
+      reminderAt: null,
+      reminderSent: false,
+    } as unknown as Task;
+    const repo = {
+      findTaskById: jest.fn().mockResolvedValue(stored),
+      updateTask: jest.fn().mockImplementation((_id: string, data: Record<string, unknown>) => {
+        updates.push(data);
+        return Promise.resolve({ ...stored, ...data });
+      }),
+    } as unknown as ClientScopedRepository;
+    const ctx: ToolContext = { repo, client: CLIENT, now: new Date('2026-07-16T09:00:00Z') };
+
+    await updateTask.execute({ task_id: 'task-9', type: 'reminder' }, ctx);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.reminderAt).toEqual(new Date('2026-07-17T15:00:00Z'));
+    expect(updates[0]?.reminderSent).toBe(false);
+  });
+
   it('updating a reminder that had NO reminderAt to a new due time re-arms the ping', async () => {
     // The existing fake task is a type:reminder with reminderAt=null (the bug
     // state). Setting a due time must give it a firing reminderAt + re-arm it.

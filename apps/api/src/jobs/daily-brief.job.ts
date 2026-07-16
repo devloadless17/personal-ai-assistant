@@ -31,6 +31,8 @@ export class DailyBriefJob implements OnApplicationBootstrap {
   lastSentCount = 0;
   lastError: string | null = null;
   ticks = 0;
+  /** Prevents a slow tick from overlapping the next 10-minute tick. */
+  private running = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -50,6 +52,11 @@ export class DailyBriefJob implements OnApplicationBootstrap {
 
   @Cron('*/10 * * * *')
   async tick(): Promise<void> {
+    if (this.running) {
+      this.logger.warn('Previous daily-brief tick still running — skipping this one.');
+      return;
+    }
+    this.running = true;
     this.lastTickAt = new Date();
     this.ticks += 1;
     try {
@@ -61,6 +68,8 @@ export class DailyBriefJob implements OnApplicationBootstrap {
         `Daily-brief tick failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
       await this.alerts.alert('brief-tick', 'Daily brief job tick failed — check API logs.');
+    } finally {
+      this.running = false;
     }
   }
 
@@ -149,15 +158,16 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       lines.push('', '📅 Calendar: couldn’t be read right now — check it directly today.');
     }
 
-    // Tasks — overdue + today, windowed & capped.
-    const { tasks } = await repo.findTasks({
-      status: 'open',
-      dueTo: dayEnd,
-      includeUndated: false,
-      limit: 25,
-    });
-    const overdue = tasks.filter((t) => t.dueAt && t.dueAt < dayStart);
-    const today = tasks.filter((t) => t.dueAt && t.dueAt >= dayStart);
+    // Tasks — overdue and today fetched SEPARATELY (each capped), so a big
+    // backlog of overdue items can never crowd today's tasks out of the window
+    // (a single dueTo query orders oldest-first and would fill all 25 slots
+    // with stale overdue, hiding today's — the exact bug this avoids).
+    const [overdueRes, todayRes] = await Promise.all([
+      repo.findTasks({ status: 'open', dueTo: dayStart, includeUndated: false, limit: 25 }),
+      repo.findTasks({ status: 'open', dueFrom: dayStart, dueTo: dayEnd, includeUndated: false, limit: 25 }),
+    ]);
+    const overdue = overdueRes.tasks.filter((t) => t.dueAt && t.dueAt < dayStart);
+    const today = todayRes.tasks.filter((t) => t.dueAt && t.dueAt >= dayStart);
     if (overdue.length > 0) {
       lines.push('', '⚠️ Overdue:');
       for (const t of overdue) lines.push(`  • ${t.title} (was due ${formatInTz(t.dueAt as Date, tz)})`);

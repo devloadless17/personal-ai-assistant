@@ -111,6 +111,11 @@ model Task {
   /// When to push a reminder to the client's Telegram (UTC)
   reminderAt   DateTime?
   reminderSent Boolean   @default(false)
+  /// Lease timestamp for at-least-once delivery: set when a tick claims this
+  /// reminder to send it, cleared/confirmed after. If a process dies between
+  /// claiming and sending, a later tick re-claims the stale lease so the
+  /// reminder is never silently lost (a rare duplicate beats a missed ping).
+  reminderClaimedAt DateTime?
 
   /// If set, this task is a companion REMINDER for a Google Calendar event
   /// (not a user-facing task). Lets us move/cancel it with the event and hide

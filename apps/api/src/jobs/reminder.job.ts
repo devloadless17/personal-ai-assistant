@@ -41,8 +41,20 @@ export class ReminderJob implements OnApplicationBootstrap {
     await this.tick();
   }
 
+  /** Lease window: a claimed-but-unconfirmed reminder is re-claimable after
+   * this long (covers a crash between claim and send). */
+  private static readonly LEASE_MS = 3 * 60_000;
+  /** Prevents a long tick from overlapping the next — avoids doubled load and
+   * heartbeat clobber. */
+  private running = false;
+
   @Cron(CronExpression.EVERY_MINUTE)
   async tick(): Promise<void> {
+    if (this.running) {
+      this.logger.warn('Previous reminder tick still running — skipping this one.');
+      return;
+    }
+    this.running = true;
     this.lastTickAt = new Date();
     this.ticks += 1;
     try {
@@ -54,16 +66,21 @@ export class ReminderJob implements OnApplicationBootstrap {
         `Reminder tick failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
       await this.alerts.alert('reminder-tick', 'Reminder job tick failed — check API logs.');
+    } finally {
+      this.running = false;
     }
   }
 
   async run(now: Date): Promise<void> {
+    const leaseCutoff = new Date(now.getTime() - ReminderJob.LEASE_MS);
     const due = await this.prisma.task.findMany({
       where: {
         reminderSent: false,
         reminderAt: { lte: now },
         status: 'open',
         client: { status: 'active', telegramChatId: { not: null } },
+        // Skip reminders another live tick just claimed; re-claim stale leases.
+        OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
       },
       include: { client: true },
       take: 100,
@@ -73,10 +90,17 @@ export class ReminderJob implements OnApplicationBootstrap {
     this.lastSentCount = 0;
 
     for (const task of due) {
-      // Atomic claim — a concurrent/duplicate run can never double-send.
+      // Atomic LEASE (not a final commit): claim only if still unsent and not
+      // freshly claimed by a concurrent tick. reminderSent stays false until
+      // delivery is CONFIRMED, so a crash after this point loses nothing — a
+      // later tick re-claims the expired lease. At-least-once by design.
       const { count } = await this.prisma.task.updateMany({
-        where: { id: task.id, reminderSent: false },
-        data: { reminderSent: true },
+        where: {
+          id: task.id,
+          reminderSent: false,
+          OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
+        },
+        data: { reminderClaimedAt: now },
       });
       if (count === 0) continue;
 
@@ -94,13 +118,19 @@ export class ReminderJob implements OnApplicationBootstrap {
           client.telegramChatId,
           `⏰ Reminder: ${task.title}${when}`,
         );
+        // Delivery CONFIRMED — only now mark it permanently sent.
+        await this.prisma.task.updateMany({
+          where: { id: task.id },
+          data: { reminderSent: true },
+        });
         this.lastSentCount += 1;
         this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
       } catch (err) {
-        // Revert the claim so the next tick retries; alert on the failure.
+        // Release the lease immediately so the next tick retries without waiting
+        // out the lease window; alert on the failure.
         await this.prisma.task.updateMany({
-          where: { id: task.id },
-          data: { reminderSent: false },
+          where: { id: task.id, reminderSent: false },
+          data: { reminderClaimedAt: null },
         });
         this.logger.error(
           `Reminder send failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,

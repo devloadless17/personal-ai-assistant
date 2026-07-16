@@ -32,6 +32,20 @@ export class GoogleCalendarGateway implements CalendarGateway {
       .map((e) => this.toEvent(e));
   }
 
+  async getEvent(eventId: string): Promise<CalendarEvent | null> {
+    try {
+      const res = await this.calendar.events.get({ calendarId: 'primary', eventId });
+      if (res.data.status === 'cancelled') return null;
+      return this.toEvent(res.data);
+    } catch (err) {
+      // 404/410 → the event no longer exists; surface as null, not a throw.
+      const e = err as { code?: number; response?: { status?: number } };
+      const code = e.code ?? e.response?.status;
+      if (code === 404 || code === 410) return null;
+      throw err;
+    }
+  }
+
   async createEvent(params: {
     title: string;
     start: Date;

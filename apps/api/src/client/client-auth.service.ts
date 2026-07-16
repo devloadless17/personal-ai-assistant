@@ -65,7 +65,8 @@ export class ClientAuthService {
     // The decoded claims are untrusted — type them loosely and validate.
     let raw: { sub?: unknown; type?: unknown; email?: unknown };
     try {
-      raw = await this.jwt.verifyAsync(token);
+      // Pin the algorithm — never accept anything but the HS256 we signed with.
+      raw = await this.jwt.verifyAsync(token, { algorithms: ['HS256'] });
     } catch {
       throw new UnauthorizedException('Invalid or expired session');
     }

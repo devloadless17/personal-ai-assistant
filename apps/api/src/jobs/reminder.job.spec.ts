@@ -37,8 +37,10 @@ function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean }): {
       ]),
       updateMany: jest.fn().mockImplementation((args: { where: unknown; data: unknown }) => {
         updates.push(args);
-        // First call is the claim; simulate lost race if claimFails.
-        const isClaim = (args.data as { reminderSent?: boolean }).reminderSent === true;
+        // The lease CLAIM sets reminderClaimedAt to a Date; simulate a lost race
+        // (another tick already holds the lease) if claimFails.
+        const data = args.data as { reminderClaimedAt?: Date | null };
+        const isClaim = 'reminderClaimedAt' in data && data.reminderClaimedAt != null;
         return Promise.resolve({ count: isClaim && opts?.claimFails ? 0 : 1 });
       }),
     },
@@ -63,33 +65,46 @@ function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean }): {
   return { job: new ReminderJob(prisma, telegram, crypto, alertsSvc), sent, updates, alerts };
 }
 
-describe('ReminderJob — claim/send/revert', () => {
-  it('claims atomically, then sends the reminder', async () => {
+describe('ReminderJob — at-least-once lease/send/confirm', () => {
+  it('leases the reminder, sends it, then confirms sent ONLY after delivery', async () => {
     const { job, sent, updates } = makeJob();
     await job.run(new Date('2026-07-16T10:00:00Z'));
-    expect(updates[0]).toEqual({
-      where: { id: 't1', reminderSent: false },
-      data: { reminderSent: true },
-    });
+    // First update = lease claim: sets reminderClaimedAt, NOT reminderSent, and
+    // its WHERE is lease-aware (unsent + no/expired lease) so it's re-claimable.
+    const claim = updates[0] as { where: Record<string, unknown>; data: Record<string, unknown> };
+    expect((claim.data as { reminderClaimedAt?: Date }).reminderClaimedAt).toEqual(
+      new Date('2026-07-16T10:00:00Z'),
+    );
+    expect((claim.where as { reminderSent?: boolean }).reminderSent).toBe(false);
+    expect((claim.where as { OR?: unknown[] }).OR).toBeDefined();
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('Call the bank');
+    // Delivery confirmed → reminderSent flips to true AFTER the send, never before.
+    expect(updates[updates.length - 1]).toEqual({
+      where: { id: 't1' },
+      data: { reminderSent: true },
+    });
   });
 
-  it('does not send when the claim is lost (duplicate/concurrent run)', async () => {
+  it('does not send when the lease is lost (a concurrent tick holds it)', async () => {
     const { job, sent } = makeJob({ claimFails: true });
     await job.run(new Date('2026-07-16T10:00:00Z'));
     expect(sent).toHaveLength(0);
   });
 
-  it('reverts the claim and alerts the admin when the send fails', async () => {
+  it('releases the lease (never marks sent) and alerts when the send fails', async () => {
     const { job, sent, updates, alerts } = makeJob({ sendFails: true });
     await job.run(new Date('2026-07-16T10:00:00Z'));
     expect(sent).toHaveLength(0);
-    // claim … then revert
+    // Lease released so the next tick retries — reminderSent is NEVER set true,
+    // so the reminder is not silently lost.
     expect(updates[updates.length - 1]).toEqual({
-      where: { id: 't1' },
-      data: { reminderSent: false },
+      where: { id: 't1', reminderSent: false },
+      data: { reminderClaimedAt: null },
     });
+    expect(updates.some((u) => (u.data as { reminderSent?: boolean }).reminderSent === true)).toBe(
+      false,
+    );
     expect(alerts).toHaveLength(1);
   });
 });

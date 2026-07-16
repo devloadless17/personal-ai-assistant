@@ -43,44 +43,52 @@ const MUTATING_TOOLS = new Set<string>([
 const COMPLETION_CLAIM = new RegExp(
   [
     // Reply that OPENS with a completion verb: "Added …", "Booked …", "Done —".
-    "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done|set)\\b",
+    "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done|set|marked|saved)\\b",
+    // "All done", "All set" as a standalone confirmation.
+    "\\ball (done|set)\\b",
     // First-person claim anywhere: "I added", "I've booked", "I'll set", "I have put".
     "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|put|arranged|confirmed|logged|remind)",
-    // Impersonal confirmations.
+    // "Got it — reminder for 9:30" style.
+    "\\bgot it\\b[\\s\\S]{0,40}\\bremind",
+    // Impersonal confirmations ("now" optional): "is scheduled", "is on your calendar".
     "\\breminder(?:'?s)?\\s+(?:is\\s+|has\\s+been\\s+)?set\\b",
     "\\bi'?ll\\s+(?:remind|ping)\\s+you\\b",
-    "\\bis\\s+now\\s+(on your calendar|scheduled|booked|set|in your (tasks|list))\\b",
-    "\\byou'?re all set\\b",
+    "\\bis\\s+(?:now\\s+)?(on (?:your|the) calendar|scheduled|booked|set|in your (tasks|list))\\b",
   ].join("|"),
   "i",
 );
 
 /**
- * Marks an honest acknowledgement of failure/no-op, so a partial-failure reply
- * ("Added A but couldn't delete B") is NOT flagged as a fabrication.
+ * Marks an honest acknowledgement of failure / no-op / read-only answer, so a
+ * partial-failure reply ("Added A but couldn't delete B") or an honest
+ * availability answer ("you're all set — nothing booked") is NOT flagged as a
+ * fabrication. Consulted for EVERY completion-claim check.
  */
 const FAILURE_ACK =
-  /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to)|not able|didn'?t go through)\b/i;
+  /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to|booked|scheduled|planned|due|on)|not able|didn'?t go through|you'?re free|you have nothing|already (done|set|scheduled|booked))\b/i;
+
+/** Tool-input keys whose values are datetimes (the only fields we anchor). */
+const DATETIME_KEYS = new Set(['due_at', 'reminder_at', 'start', 'end', 'from', 'to']);
 
 /**
- * Recursively rewrite offset-less ISO datetime strings in a tool-input value so
- * they carry the client timezone's offset. Non-strings, already-offset strings,
- * and non-datetime strings (titles, notes, ids) pass through untouched — the
- * ISO shape check is strict enough that free text is never matched.
+ * Rewrite offset-less ISO datetimes in tool input to carry the client
+ * timezone's offset — but ONLY for keys known to be datetime fields. Anchoring
+ * by KEY (not by string shape) is essential: a task titled or noted "2026-01-01"
+ * is a date-shaped string that must be left exactly as typed, not rewritten
+ * into a timestamp. Free-text fields therefore always pass through untouched.
  */
 function anchorDateTimes(value: unknown, timeZone: string): unknown {
-  if (typeof value === 'string') {
-    return isOffsetlessIso(value) ? withClientOffset(value, timeZone) : value;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => anchorDateTimes(v, timeZone));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === 'string' && DATETIME_KEYS.has(k) && isOffsetlessIso(v)) {
+      out[k] = withClientOffset(v, timeZone);
+    } else {
+      out[k] = anchorDateTimes(v, timeZone);
+    }
   }
-  if (Array.isArray(value)) {
-    return value.map((v) => anchorDateTimes(v, timeZone));
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = anchorDateTimes(v, timeZone);
-    return out;
-  }
-  return value;
+  return out;
 }
 
 export interface CalendarGatewayFactory {
@@ -218,9 +226,13 @@ export class AgentService {
       //       (catches "Added A and deleted B" when B failed).
       const text = this.extractText(response);
       const claimsCompletion = text ? COMPLETION_CLAIM.test(text) : false;
+      // An honest failure/no-op/availability acknowledgement exempts the reply
+      // in BOTH the no-mutation and errored-mutation cases — so a read-only
+      // answer ("you're all set — nothing booked") is never wrongly corrected.
       const fabricated =
         claimsCompletion &&
-        (!successfulMutation || (mutationError && !FAILURE_ACK.test(text)));
+        !FAILURE_ACK.test(text) &&
+        (!successfulMutation || mutationError);
       if (text && fabricated && !corrected) {
         corrected = true;
         iteration--; // don't charge the correction against the tool budget

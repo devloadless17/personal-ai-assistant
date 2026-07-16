@@ -15,6 +15,9 @@ function makeGateway(existing: CalendarEvent[]): CalendarGateway & { created: Ca
   return {
     created,
     listEvents: jest.fn().mockResolvedValue(existing),
+    getEvent: jest
+      .fn()
+      .mockImplementation((id: string) => Promise.resolve(existing.find((e) => e.id === id) ?? null)),
     createEvent: jest.fn().mockImplementation((p: { title: string; start: Date; end: Date }) => {
       const e: CalendarEvent = { id: `ev-${created.length + 1}`, allDay: false, ...p };
       created.push(e);
@@ -148,6 +151,35 @@ describe('calendar tools — conflict gating & honesty', () => {
     );
     expect(clash).toContain('CONFLICT');
     expect(clash).toContain('Other meeting');
+  });
+
+  it('a SINGLE-SIDED time change still runs the conflict check (fills the missing side)', async () => {
+    const other: CalendarEvent = {
+      ...MEETING,
+      id: 'busy-2',
+      title: 'Other meeting',
+      start: new Date('2026-07-17T14:00:00Z'),
+      end: new Date('2026-07-17T15:00:00Z'),
+    };
+    const gw = makeGateway([MEETING, other]); // busy-1 is 10:00–11:00
+    // Extend busy-1 by setting ONLY end to 14:30 → it now spans into busy-2.
+    // Without fetching the current start, the conflict gate would be skipped.
+    const clash = await updateCalendarEvent.execute(
+      { event_id: 'busy-1', end: new Date('2026-07-17T14:30:00Z') },
+      ctxWith(gw),
+    );
+    expect(clash).toContain('CONFLICT');
+    expect(clash).toContain('Other meeting');
+  });
+
+  it('a single-sided move that produces end <= start is rejected, not sent to Google', async () => {
+    const gw = makeGateway([MEETING]); // busy-1 is 10:00–11:00
+    // Move only start to 11:30 (past the unchanged 11:00 end).
+    const res = await updateCalendarEvent.execute(
+      { event_id: 'busy-1', start: new Date('2026-07-17T11:30:00Z') },
+      ctxWith(gw),
+    );
+    expect(res).toContain('ERROR');
   });
 
   it('every calendar tool answers honestly when Google is not connected', async () => {
