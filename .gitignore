@@ -12,6 +12,8 @@ next-env.d.ts
 .env
 .env.*
 !.env.example
+# placeholder template rendered by CI on deploy — contains no secrets
+!.env.prod.example
 
 # logs
 *.log
