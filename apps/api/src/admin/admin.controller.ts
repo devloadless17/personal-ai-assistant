@@ -1,0 +1,117 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import { z } from 'zod';
+import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
+import { AdminAuthGuard } from './admin-auth.guard';
+import { AdminAuthService } from './admin-auth.service';
+import { AdminClientsService } from './admin-clients.service';
+
+const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+
+const createClientSchema = z.object({
+  name: z.string().min(1).max(200),
+  timezone: z.string().min(1),
+  assistantName: z.string().min(1).max(100).default('Assistant'),
+  dailyBriefHour: z.number().int().min(0).max(23).optional(),
+});
+
+const updateClientSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  timezone: z.string().min(1).optional(),
+  assistantName: z.string().min(1).max(100).optional(),
+  status: z.enum(['active', 'disabled']).optional(),
+  dailyBriefHour: z.number().int().min(0).max(23).optional(),
+});
+
+const connectTelegramSchema = z.object({ botToken: z.string().min(20) });
+
+@Controller('admin')
+export class AdminController {
+  constructor(
+    private readonly auth: AdminAuthService,
+    private readonly clients: AdminClientsService,
+  ) {}
+
+  @Post('auth/login')
+  @HttpCode(200)
+  async login(@Body() body: unknown): Promise<{ token: string }> {
+    const input = loginSchema.parse(body);
+    return this.auth.login(input.email, input.password);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('clients')
+  async list(): Promise<ClientSummary[]> {
+    return this.clients.list();
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('clients')
+  async create(@Body() body: unknown): Promise<ClientSummary> {
+    return this.clients.create(createClientSchema.parse(body));
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('clients/:id')
+  async get(@Param('id') id: string): Promise<ClientSummary> {
+    return this.clients.get(id);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Patch('clients/:id')
+  async update(@Param('id') id: string, @Body() body: unknown): Promise<ClientSummary> {
+    return this.clients.update(id, updateClientSchema.parse(body));
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('clients/:id/telegram')
+  async connectTelegram(
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<{ botUsername: string }> {
+    const input = connectTelegramSchema.parse(body);
+    return this.clients.connectTelegram(id, input.botToken);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('clients/:id/google/connect-url')
+  connectGoogle(@Param('id') id: string): { url: string } {
+    return this.clients.googleConnectUrl(id);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('clients/:id/audit')
+  async audit(
+    @Param('id') id: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+    @Query('success') success?: string,
+  ): Promise<Paginated<AuditLogEntry>> {
+    return this.clients.auditLog(id, {
+      cursor,
+      limit: limit ? Number(limit) : undefined,
+      success: success === undefined ? undefined : success === 'true',
+    });
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('clients/:id/usage')
+  async usage(@Param('id') id: string): Promise<{
+    messagesIn: number;
+    messagesOut: number;
+    toolCalls: number;
+    toolFailures: number;
+    lastActivity: string | null;
+  }> {
+    return this.clients.usage(id);
+  }
+}

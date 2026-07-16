@@ -40,6 +40,10 @@ const envSchema = z.object({
   // Milestone 5+
   ADMIN_ALERT_BOT_TOKEN: z.string().optional(),
   ADMIN_ALERT_CHAT_ID: z.string().optional(),
+
+  // Milestone 6+ — bootstrap dashboard admin (created at boot if none exists)
+  ADMIN_EMAIL: z.string().email().optional(),
+  ADMIN_PASSWORD: z.string().min(12, 'ADMIN_PASSWORD must be at least 12 chars').optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

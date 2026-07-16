@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
 import { validateEnv } from './config/env.validation';
 import { CryptoModule } from './crypto/crypto.module';
@@ -26,6 +27,7 @@ import { TenancyModule } from './tenancy/tenancy.module';
     TelegramModule,
     GoogleModule,
     JobsModule,
+    AdminModule,
     HealthModule,
     // Dev-only chat harness — never registered outside development.
     ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),
