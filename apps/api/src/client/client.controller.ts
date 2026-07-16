@@ -99,6 +99,11 @@ export class ClientController {
       timezone: client.timezone,
       telegramConnected: Boolean(client.telegramBotTokenEnc),
       telegramBotUsername: client.telegramBotUsername,
+      telegramDeepLink:
+        client.telegramBotUsername && client.telegramBindCode
+          ? `https://t.me/${client.telegramBotUsername}?start=${client.telegramBindCode}`
+          : null,
+      telegramChatBound: Boolean(client.telegramChatId),
       googleConnected: Boolean(client.googleOAuthEnc),
       googleNeedsReauth: client.googleNeedsReauth,
       defaultReminderMinutes: client.defaultReminderMinutes,

@@ -20,6 +20,10 @@ function summarize(c: Client): ClientSummary {
     email: c.email,
     telegramConnected: Boolean(c.telegramBotTokenEnc),
     telegramBotUsername: c.telegramBotUsername,
+    telegramDeepLink:
+      c.telegramBotUsername && c.telegramBindCode
+        ? `https://t.me/${c.telegramBotUsername}?start=${c.telegramBindCode}`
+        : null,
     telegramChatBound: Boolean(c.telegramChatId),
     googleConnected: Boolean(c.googleOAuthEnc),
     googleNeedsReauth: c.googleNeedsReauth,
@@ -109,12 +113,14 @@ export class AdminClientsService {
     const client = await this.prisma.client.findUnique({ where: { id } });
     if (!client) throw new NotFoundException('Client not found');
 
-    await this.telegramConnection.removeWebhook(client.telegramBotTokenEnc);
+    // Delete first — only silence the bot AFTER the delete actually commits, so
+    // a rolled-back transaction never leaves a live client with a dead webhook.
     await this.prisma.$transaction([
       this.prisma.auditLog.deleteMany({ where: { clientId: id } }),
       // Tasks, memories, messages cascade on client delete.
       this.prisma.client.delete({ where: { id } }),
     ]);
+    await this.telegramConnection.removeWebhook(client.telegramBotTokenEnc);
     this.logger.warn(`Client permanently deleted: ${id} (${client.name})`);
   }
 

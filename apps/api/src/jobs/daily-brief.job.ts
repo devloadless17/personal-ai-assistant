@@ -7,7 +7,7 @@ import { GoogleCalendarGateway } from '../integrations/google/google-calendar.ga
 import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenancyService } from '../tenancy/tenancy.service';
-import { formatInTz, startOfTodayInTz } from '../tools/time';
+import { endOfTodayInTz, formatInTz, startOfTodayInTz } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
 
 /**
@@ -96,7 +96,7 @@ export class DailyBriefJob {
   private async buildBrief(client: Client, now: Date): Promise<string> {
     const tz = client.timezone;
     const dayStart = startOfTodayInTz(now, tz);
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60_000);
+    const dayEnd = endOfTodayInTz(now, tz); // DST-exact (not a fixed +24h)
     const repo = this.tenancy.repoFor(client.id);
 
     const lines: string[] = [`☀️ Good morning, ${client.name}! Here's your day:`];

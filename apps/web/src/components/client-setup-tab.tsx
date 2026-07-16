@@ -203,7 +203,7 @@ function TelegramCard({
         { method: "POST", body: { botToken } },
       );
       setResult(
-        `Connected @${botUsername} — webhook registered. Ask the client to open t.me/${botUsername} and send any message to activate.`,
+        `Connected @${botUsername} — webhook registered. Copy the secure link below and send it to the client.`,
       );
       setBotToken("");
       await onChanged();
@@ -268,7 +268,6 @@ function ShareableBotLink({
   client: ClientSummary;
   onChanged: () => void | Promise<void>;
 }) {
-  const link = `https://t.me/${client.telegramBotUsername}`;
   const [copied, setCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState<string | null>(null);
@@ -278,7 +277,7 @@ function ShareableBotLink({
     setResetMsg(null);
     try {
       await api(`/admin/clients/${client.id}/telegram/reset-binding`, { method: "POST" });
-      setResetMsg("Binding cleared — the next person to message the bot will be linked.");
+      setResetMsg("A fresh link was generated below — send it to the intended client.");
       await onChanged();
     } catch {
       setResetMsg("Couldn't reset the binding.");
@@ -287,20 +286,39 @@ function ShareableBotLink({
     }
   }
 
+  // Bound and no pending link → the intended client is already chatting.
+  if (client.telegramChatBound && !client.telegramDeepLink) {
+    return (
+      <div className="rounded-md border bg-muted/40 p-3">
+        <p className="text-sm font-medium">Connected &amp; chatting ✓</p>
+        <p className="mb-2 text-xs text-muted-foreground">
+          @{client.telegramBotUsername} is linked to this client. If the wrong person linked, reset
+          to issue a new secure link that only your intended client can use.
+        </p>
+        <Button variant="ghost" size="sm" type="button" onClick={resetBinding} disabled={resetting}>
+          {resetting ? "Resetting…" : "Reset & issue new link"}
+        </Button>
+        {resetMsg && <p className="mt-2 text-xs text-muted-foreground">{resetMsg}</p>}
+      </div>
+    );
+  }
+
+  if (!client.telegramDeepLink) return null;
+
   return (
     <div className="rounded-md border bg-muted/40 p-3">
-      <p className="text-sm font-medium">Send this link to the client</p>
+      <p className="text-sm font-medium">Send this secure link to the client</p>
       <p className="mb-2 text-xs text-muted-foreground">
-        They tap it, press Start, and begin chatting — no setup on their side. The first person to
-        message binds to this client{client.telegramChatBound ? " (already bound ✓)" : ""}.
+        They tap it and press Start — no setup on their side. Only this exact link can link their
+        account (a leaked bot name alone can’t), and it binds to the first person who opens it.
       </p>
       <div className="flex items-center gap-2">
-        <Input readOnly value={link} className="font-mono text-xs" />
+        <Input readOnly value={client.telegramDeepLink} className="font-mono text-xs" />
         <Button
           variant="secondary"
           type="button"
           onClick={async () => {
-            await navigator.clipboard.writeText(link);
+            await navigator.clipboard.writeText(client.telegramDeepLink ?? "");
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
           }}
@@ -308,18 +326,6 @@ function ShareableBotLink({
           {copied ? "Copied ✓" : "Copy"}
         </Button>
       </div>
-      {client.telegramChatBound && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="mt-2"
-          type="button"
-          onClick={resetBinding}
-          disabled={resetting}
-        >
-          {resetting ? "Resetting…" : "Reset chat binding"}
-        </Button>
-      )}
       {resetMsg && <p className="mt-2 text-xs text-muted-foreground">{resetMsg}</p>}
     </div>
   );

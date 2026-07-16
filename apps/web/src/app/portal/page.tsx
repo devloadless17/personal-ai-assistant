@@ -152,7 +152,13 @@ export default function PortalPage() {
 }
 
 function ChatOnTelegram({ me }: { me: ClientMe }) {
-  const link = me.telegramBotUsername ? `https://t.me/${me.telegramBotUsername}` : null;
+  // Before binding: the secure deep link (with code). After binding: the plain
+  // bot link (they're already connected).
+  const link =
+    me.telegramDeepLink ??
+    (me.telegramChatBound && me.telegramBotUsername
+      ? `https://t.me/${me.telegramBotUsername}`
+      : null);
   return (
     <Card>
       <CardHeader>
@@ -165,7 +171,7 @@ function ChatOnTelegram({ me }: { me: ClientMe }) {
       <CardContent>
         {link ? (
           <Button render={<a href={link} target="_blank" rel="noopener noreferrer" />}>
-            Open @{me.telegramBotUsername} on Telegram
+            {me.telegramChatBound ? "Open your assistant on Telegram" : "Start chatting on Telegram"}
           </Button>
         ) : (
           <p className="text-sm text-muted-foreground">

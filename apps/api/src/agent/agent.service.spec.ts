@@ -30,6 +30,7 @@ const CLIENT: Client = {
   googleOAuthEnc: null,
   googleNeedsReauth: false,
   telegramBotUsername: null,
+  telegramBindCode: null,
   defaultReminderMinutes: 15,
   dailyBriefHour: 7,
   lastBriefDate: null,
@@ -282,6 +283,51 @@ describe('AgentService — reliability invariants', () => {
     const reply = await agent.respond(CLIENT);
     expect(createMessage).toHaveBeenCalledTimes(1); // no correction round
     expect(reply).toBe('You have nothing scheduled this afternoon.');
+  });
+
+  it('does not "correct" a listing turn whose items start with action verbs', async () => {
+    const { repo } = makeFakeRepo();
+    // read-only get_tasks, then a reply that LISTS an item titled "Booked venue".
+    const { agent, createMessage } = makeAgent(
+      [
+        toolUseResponse('get_tasks', {}),
+        textResponse('Here\'s today:\n1. Booked venue — 5pm\n2. Call Sam'),
+      ],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(2); // no spurious correction round
+    expect(reply).toContain('Booked venue');
+  });
+
+  it('catches a PARTIAL fabrication: one action succeeds, another errors, reply claims both', async () => {
+    const { repo } = makeFakeRepo();
+    // create_task(A) ok + delete_task(B) errors, but the reply claims both done
+    // with no acknowledgement → must force a correction.
+    const first = {
+      id: 'msg',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-opus-4-8',
+      content: [
+        { type: 'tool_use', id: 't1', name: 'create_task', input: { title: 'A' } },
+        { type: 'tool_use', id: 't2', name: 'delete_task', input: { task_id: 'nope' } },
+      ],
+      stop_reason: 'tool_use',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    } as unknown as Anthropic.Message;
+    const { agent, createMessage } = makeAgent(
+      [
+        first,
+        textResponse('Added A and deleted B.'), // B did NOT delete — fabrication
+        textResponse('Added A. I couldn’t delete B — it wasn’t found.'),
+      ],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(3); // correction fired
+    expect(reply).toContain('couldn’t delete');
   });
 
   it('a real mutation followed by a completion claim is trusted (no correction)', async () => {

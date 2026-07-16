@@ -5,11 +5,14 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { json } from 'express';
 import { AppModule } from './app.module';
+import { ZodExceptionFilter } from './common/zod-exception.filter';
 import type { Env } from './config/env.validation';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableShutdownHooks();
+  // Malformed request bodies (Zod parse) → 400 with field messages, not 500.
+  app.useGlobalFilters(new ZodExceptionFilter());
 
   // Behind the reverse proxy: real client IPs for rate limiting/logs.
   app.set('trust proxy', 1);

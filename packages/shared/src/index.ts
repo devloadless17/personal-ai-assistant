@@ -29,6 +29,8 @@ export interface ClientSummary {
   email: string | null;
   telegramConnected: boolean;
   telegramBotUsername: string | null;
+  /** t.me deep link with the one-time bind code — send this to the client. Null once bound. */
+  telegramDeepLink: string | null;
   telegramChatBound: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
@@ -45,6 +47,9 @@ export interface ClientMe {
   timezone: string;
   telegramConnected: boolean;
   telegramBotUsername: string | null;
+  /** t.me deep link with the one-time bind code, if the client hasn't bound yet. */
+  telegramDeepLink: string | null;
+  telegramChatBound: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
   defaultReminderMinutes: number;

@@ -19,7 +19,9 @@ function resolveReminderAt(
 ): ReminderResolution {
   if (reminderAt !== undefined) return { changed: true, value: reminderAt };
   if (minutesBefore === undefined) return { changed: false };
-  if (minutesBefore === null) return { changed: true, value: null }; // clear
+  // 0 or null both mean "no reminder" — consistent with create_calendar_event
+  // and the "no automatic reminders" preference.
+  if (minutesBefore === null || minutesBefore === 0) return { changed: true, value: null };
   if (!dueAt) {
     return { error: 'a reminder lead time needs a due time — set due_at as well' };
   }
@@ -129,14 +131,30 @@ export const updateTask = defineTool({
   }),
   async execute(input, ctx) {
     const { task_id, due_at, reminder_at, reminder_minutes_before, ...rest } = input;
-    // For a lead-time reminder we need the due time (new or existing).
-    let dueRef = due_at;
-    if (reminder_minutes_before !== undefined && reminder_minutes_before !== null && due_at === undefined) {
-      const existing = await ctx.repo.findTaskById(task_id);
-      dueRef = existing?.dueAt ?? null;
-    }
-    const rem = resolveReminderAt(reminder_at, reminder_minutes_before, dueRef);
+
+    // We may need the existing task to resolve a lead-time or to keep a
+    // reminder's lead when only the due time moves.
+    const needsExisting =
+      (reminder_minutes_before != null && due_at === undefined) || due_at !== undefined;
+    const existing = needsExisting ? await ctx.repo.findTaskById(task_id) : null;
+
+    const dueRef = due_at !== undefined ? due_at : (existing?.dueAt ?? null);
+    let rem = resolveReminderAt(reminder_at, reminder_minutes_before, dueRef);
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was changed.`;
+
+    // F6: rescheduling the due time (with no explicit reminder change) shifts
+    // an existing reminder to keep the SAME lead — never leaves it behind.
+    if (
+      !rem.changed &&
+      due_at !== undefined &&
+      due_at !== null &&
+      existing?.dueAt &&
+      existing.reminderAt
+    ) {
+      const lead = existing.dueAt.getTime() - existing.reminderAt.getTime();
+      rem = { changed: true, value: new Date(due_at.getTime() - lead) };
+    }
+
     const task = await ctx.repo.updateTask(task_id, {
       ...rest,
       ...(due_at !== undefined ? { dueAt: due_at } : {}),

@@ -49,15 +49,43 @@ export function isoInTz(date: Date, timeZone: string): string {
   return `${get('year')}-${get('month')}-${get('day')}T${hour}:${get('minute')}:${get('second')}${offset}`;
 }
 
-/** Start of "today" in the client's timezone, as a UTC Date. */
-export function startOfTodayInTz(now: Date, timeZone: string): Date {
-  const ymd = new Intl.DateTimeFormat('en-CA', {
+/** The UTC instant of local midnight for a given YYYY-MM-DD in a timezone. */
+function utcForLocalMidnight(ymd: string, timeZone: string): Date {
+  // The offset can differ at midnight vs. noon on a DST-transition day, so we
+  // don't reuse `now`'s offset. Two-pass: guess with the offset seen when the
+  // naive-UTC candidate is interpreted in the zone, then correct once using the
+  // offset at the resulting instant. Correct except in the ambiguous fall-back
+  // hour (acceptable for day bucketing).
+  const naiveUtc = new Date(`${ymd}T00:00:00Z`);
+  const firstOffset = isoInTz(naiveUtc, timeZone).slice(-6); // e.g. "+03:00"
+  const firstGuess = new Date(`${ymd}T00:00:00${firstOffset}`);
+  const secondOffset = isoInTz(firstGuess, timeZone).slice(-6);
+  return new Date(`${ymd}T00:00:00${secondOffset}`);
+}
+
+function localYmd(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(now); // "2026-07-18"
-  // Resolve that local midnight to UTC by using the offset at `now`.
-  const offset = isoInTz(now, timeZone).slice(-6);
-  return new Date(`${ymd}T00:00:00${offset}`);
+  }).format(date);
+}
+
+/** Start of "today" in the client's timezone, as a UTC Date. */
+export function startOfTodayInTz(now: Date, timeZone: string): Date {
+  return utcForLocalMidnight(localYmd(now, timeZone), timeZone);
+}
+
+/**
+ * End of "today" in the client's timezone (= start of tomorrow), as a UTC Date.
+ * Derived from the next calendar date, so DST days (23h/25h) are exact rather
+ * than assuming a 24-hour day.
+ */
+export function endOfTodayInTz(now: Date, timeZone: string): Date {
+  const start = startOfTodayInTz(now, timeZone);
+  // Jump ~26h forward to safely land on the next local date, then take its
+  // local midnight.
+  const nextish = new Date(start.getTime() + 26 * 60 * 60_000);
+  return utcForLocalMidnight(localYmd(nextish, timeZone), timeZone);
 }

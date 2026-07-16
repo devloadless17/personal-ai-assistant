@@ -32,23 +32,34 @@ const MUTATING_TOOLS = new Set<string>([
 
 /**
  * Detects when the assistant ASSERTS it just completed/committed an action.
- * Deliberately high-precision (first-person or leading-verb forms) so honest,
- * negated replies like "nothing was changed" or "you have nothing scheduled"
- * do NOT trigger it. Used only to catch a claimed change when NO mutating tool
- * ran — the last line of defence against a model-hallucinated confirmation.
+ * Deliberately high-precision (only the very start of the reply, or explicit
+ * first-person/impersonal completion phrasing) so honest, negated replies like
+ * "nothing was changed", "you have nothing scheduled", or a listing like
+ * "1. Booked venue — 5pm" do NOT trigger it. Used to catch a claimed change
+ * when the real work didn't happen — the last line of defence against a
+ * model-hallucinated confirmation.
  */
 const COMPLETION_CLAIM = new RegExp(
   [
-    // Sentence that STARTS with a completion verb: "Added …", "Booked …".
-    "(^|[.!?]\\s+)(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done)\\b",
-    // First-person claim: "I added", "I've booked", "I'll set", "I have scheduled".
-    "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|remind)",
-    // Reminder confirmations.
+    // Reply that OPENS with a completion verb: "Added …", "Booked …", "Done —".
+    "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done|set)\\b",
+    // First-person claim anywhere: "I added", "I've booked", "I'll set", "I have put".
+    "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|put|arranged|confirmed|logged|remind)",
+    // Impersonal confirmations.
     "\\breminder(?:'?s)?\\s+(?:is\\s+|has\\s+been\\s+)?set\\b",
     "\\bi'?ll\\s+(?:remind|ping)\\s+you\\b",
+    "\\bis\\s+now\\s+(on your calendar|scheduled|booked|set|in your (tasks|list))\\b",
+    "\\byou'?re all set\\b",
   ].join("|"),
   "i",
 );
+
+/**
+ * Marks an honest acknowledgement of failure/no-op, so a partial-failure reply
+ * ("Added A but couldn't delete B") is NOT flagged as a fabrication.
+ */
+const FAILURE_ACK =
+  /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to)|not able|didn'?t go through)\b/i;
 
 export interface CalendarGatewayFactory {
   /** Returns a gateway bound to this client's Google credentials, or null if not connected. */
@@ -136,6 +147,7 @@ export class AgentService {
     ctx: ToolContext,
   ): Promise<string> {
     let successfulMutation = false;
+    let mutationError = false;
     let corrected = false;
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -156,8 +168,9 @@ export class AgentService {
         for (const use of toolUses) {
           const block = await this.executeTool(use, ctx);
           results.push(block);
-          if (MUTATING_TOOLS.has(use.name) && block.is_error !== true) {
-            successfulMutation = true;
+          if (MUTATING_TOOLS.has(use.name)) {
+            if (block.is_error === true) mutationError = true;
+            else successfulMutation = true;
           }
         }
         messages.push({ role: 'user', content: results });
@@ -176,20 +189,27 @@ export class AgentService {
       }
 
       // end_turn: the model is done. Before trusting the reply, enforce the
-      // core invariant BEHAVIOURALLY: if it claims a completed action but no
-      // mutating tool actually ran this turn, force it to either do it or drop
-      // the claim. One correction attempt, then we trust the corrected reply.
+      // core invariant BEHAVIOURALLY. Force a correction when the reply claims
+      // a completed action but the real work didn't happen:
+      //   (a) NO mutating tool succeeded this turn, or
+      //   (b) a mutating tool ERRORED and the reply doesn't own up to it
+      //       (catches "Added A and deleted B" when B failed).
       const text = this.extractText(response);
-      if (text && !successfulMutation && !corrected && COMPLETION_CLAIM.test(text)) {
+      const claimsCompletion = text ? COMPLETION_CLAIM.test(text) : false;
+      const fabricated =
+        claimsCompletion &&
+        (!successfulMutation || (mutationError && !FAILURE_ACK.test(text)));
+      if (text && fabricated && !corrected) {
         corrected = true;
+        iteration--; // don't charge the correction against the tool budget
         this.logger.warn(
-          `Client ${ctx.client.id}: reply claimed an action with no tool call — forcing correction`,
+          `Client ${ctx.client.id}: reply claimed an action that didn't fully happen — forcing correction`,
         );
         messages.push({ role: 'assistant', content: response.content });
         messages.push({
           role: 'user',
           content:
-            'SYSTEM CHECK: your last message told me something was done, but you did not call any tool this turn, so nothing actually happened. If I asked you to add, update, schedule, remind, complete, or delete something, call the correct tool NOW to really do it. If nothing needed changing, reply again WITHOUT claiming any action was completed.',
+            'SYSTEM CHECK: your last message told me something was done, but the tool to do it did not run successfully this turn, so it did NOT actually happen. Call the correct tool NOW to really do it. If it genuinely cannot be done, reply again stating plainly what did and did not go through — never claim a completed action that did not occur.',
         });
         continue;
       }

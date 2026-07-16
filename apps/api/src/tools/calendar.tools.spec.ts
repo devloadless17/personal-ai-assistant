@@ -38,8 +38,13 @@ function makeGateway(existing: CalendarEvent[]): CalendarGateway & { created: Ca
 }
 
 function ctxWith(gateway?: CalendarGateway): ToolContext {
+  const repo = {
+    createTask: jest.fn().mockResolvedValue({}),
+    deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+    getEventReminderLead: jest.fn().mockResolvedValue(null),
+  } as unknown as ClientScopedRepository;
   return {
-    repo: {} as ClientScopedRepository,
+    repo,
     client: CLIENT,
     now: new Date('2026-07-16T09:00:00Z'),
     calendar: gateway,

@@ -64,17 +64,41 @@ export class TelegramUpdateProcessor {
       return;
     }
 
-    // ── Chat binding: the first private chat to message the bot becomes THE
-    // client's chat; anything else is refused (and never reaches the agent).
+    // ── Chat binding: only a FIRST private chat that presents the correct
+    // one-time code (from the admin's t.me deep link, sent as "/start <code>")
+    // may bind. This stops a leaked/guessed bot link from hijacking the
+    // client's assistant. After binding, other chats are refused.
     const chatId = String(msg.chat.id);
     if (!client.telegramChatId) {
       if (msg.chat.type !== 'private') return;
+      const presented = this.extractStartCode(msg.text);
+      if (!client.telegramBindCode || presented !== client.telegramBindCode) {
+        this.logger.warn(
+          `Client ${client.id}: chat ${chatId} tried to bind without a valid code — refused`,
+        );
+        if (msg.text) {
+          await this.telegram.sendMessage(
+            botToken,
+            chatId,
+            'To start, please open the exact link your administrator sent you.',
+          );
+        }
+        return;
+      }
+      // Bind, and burn the code so the link can't bind a second chat.
       await this.prisma.client.update({
         where: { id: client.id },
-        data: { telegramChatId: chatId },
+        data: { telegramChatId: chatId, telegramBindCode: null },
       });
-      client = { ...client, telegramChatId: chatId };
-      this.logger.log(`Client ${client.id} bound to Telegram chat ${chatId}`);
+      client = { ...client, telegramChatId: chatId, telegramBindCode: null };
+      this.logger.log(`Client ${client.id} bound to Telegram chat ${chatId} via code`);
+      await this.telegram.sendMessage(
+        botToken,
+        chatId,
+        `Hi! I'm ${client.assistantName}, your assistant. Ask me about your day, or tell me to add a task or book a meeting.`,
+      );
+      // The "/start <code>" message itself isn't a real request — stop here.
+      return;
     } else if (client.telegramChatId !== chatId) {
       this.logger.warn(
         `Client ${client.id}: update from foreign chat ${chatId} refused (bound to ${client.telegramChatId})`,
@@ -121,5 +145,12 @@ export class TelegramUpdateProcessor {
 
     await repo.saveMessage({ direction: 'outbound', content: reply });
     await this.telegram.sendMessage(botToken, chatId, reply);
+  }
+
+  /** Extract the payload from a "/start <code>" message (Telegram deep link). */
+  private extractStartCode(text: string | undefined): string | null {
+    if (!text) return null;
+    const match = /^\/start(?:@\w+)?\s+([A-Za-z0-9_-]+)/.exec(text.trim());
+    return match?.[1] ?? null;
   }
 }

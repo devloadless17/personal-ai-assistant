@@ -38,6 +38,9 @@ export class ClientScopedRepository {
     const where: Prisma.TaskWhereInput = {
       clientId: this.clientId,
       status,
+      // Companion calendar reminders are internal, not user-facing tasks —
+      // the meeting itself is shown via the calendar.
+      sourceEventId: null,
       ...(dueAtRange
         ? includeUndated
           ? { OR: [{ dueAt: dueAtRange }, { dueAt: null }] }
@@ -66,8 +69,26 @@ export class ClientScopedRepository {
     dueAt?: Date | null;
     reminderAt?: Date | null;
     notes?: string | null;
+    sourceEventId?: string | null;
+    reminderLeadMinutes?: number | null;
   }): Promise<Task> {
     return this.prisma.task.create({ data: { ...data, clientId: this.clientId } });
+  }
+
+  /** Delete the companion reminder(s) for a calendar event, if any. */
+  async deleteEventReminders(eventId: string): Promise<void> {
+    await this.prisma.task.deleteMany({
+      where: { clientId: this.clientId, sourceEventId: eventId },
+    });
+  }
+
+  /** The lead time of an event's companion reminder, so a move can preserve it. */
+  async getEventReminderLead(eventId: string): Promise<number | null> {
+    const task = await this.prisma.task.findFirst({
+      where: { clientId: this.clientId, sourceEventId: eventId },
+      select: { reminderLeadMinutes: true },
+    });
+    return task?.reminderLeadMinutes ?? null;
   }
 
   /** Returns the updated task, or null if no row matched (id AND clientId). */

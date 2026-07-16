@@ -72,15 +72,29 @@ export const findFreeTime = defineTool({
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
     if (input.to <= input.from) return 'ERROR: "to" must be after "from".';
+    // Never propose times in the past.
+    const from = input.from.getTime() < ctx.now.getTime() ? ctx.now : input.from;
+    if (input.to <= from) return 'That window is already in the past.';
+    const tz = ctx.client.timezone;
     const slots = await ctx.calendar.findFreeSlots({
-      from: input.from,
+      from,
       to: input.to,
       durationMinutes: input.duration_minutes,
-      limit: input.limit,
+      limit: 20,
     });
-    if (slots.length === 0) return 'No open slots of that length in that window.';
-    const tz = ctx.client.timezone;
-    return slots.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
+    // Prefer sensible waking hours (8am–9pm local); fall back to any slot only
+    // if daytime is fully booked, so we never lead with a 2 AM suggestion.
+    const localHour = (d: Date): number =>
+      Number(
+        new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(d),
+      );
+    const daytime = slots.filter((s) => {
+      const h = localHour(s.start);
+      return h >= 8 && h < 21;
+    });
+    const chosen = (daytime.length > 0 ? daytime : slots).slice(0, input.limit ?? 5);
+    if (chosen.length === 0) return 'No open slots of that length in that window.';
+    return chosen.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
   },
 });
 
@@ -128,13 +142,16 @@ export const createCalendarEvent = defineTool({
     let reminderNote = '';
     if (input.reminder_minutes_before && input.reminder_minutes_before > 0) {
       // A companion reminder in our DB drives the Telegram ping via the same
-      // reliable reminder cron the tasks use (the calendar itself is not polled).
+      // reliable reminder cron the tasks use (the calendar itself is not
+      // polled). It's linked to the event id so it moves/cancels with it.
       const reminderAt = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
       if (reminderAt.getTime() > ctx.now.getTime()) {
         await ctx.repo.createTask({
           title: `Reminder: ${input.title}`,
           type: 'reminder',
           reminderAt,
+          sourceEventId: event.id,
+          reminderLeadMinutes: input.reminder_minutes_before,
         });
         reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before.`;
       }
@@ -154,6 +171,13 @@ export const updateCalendarEvent = defineTool({
     end: isoDateTime.optional().describe('New end (ISO 8601).'),
     description: z.string().max(2000).optional(),
     location: z.string().max(300).optional(),
+    reminder_minutes_before: z
+      .number()
+      .int()
+      .min(0)
+      .max(10080)
+      .optional()
+      .describe('Change the Telegram reminder lead (0 to remove it). If omitted, an existing reminder is kept and moves with the event.'),
     allow_conflict: z.boolean().optional(),
   }),
   async execute(input, ctx) {
@@ -167,10 +191,35 @@ export const updateCalendarEvent = defineTool({
         return `CONFLICT — nothing was changed. The new time overlaps:\n${conflicts}\nAsk the client whether to pick another time or move anyway (then retry with allow_conflict=true).`;
       }
     }
-    const { event_id, allow_conflict, ...changes } = input;
+    const { event_id, allow_conflict, reminder_minutes_before, start, ...rest } = input;
     void allow_conflict; // consumed by the conflict gate above
-    const event = await ctx.calendar.updateEvent(event_id, changes);
-    return `Updated on calendar: ${renderEvent(event, ctx.client.timezone)}`;
+    const event = await ctx.calendar.updateEvent(event_id, { ...rest, start });
+
+    // Keep the companion reminder correct: explicit lead wins; otherwise a
+    // moved event preserves its existing lead; a title-only edit leaves it be.
+    let reminderNote = '';
+    let desiredLead: number | null | undefined;
+    if (reminder_minutes_before !== undefined) desiredLead = reminder_minutes_before;
+    else if (start !== undefined) desiredLead = await ctx.repo.getEventReminderLead(event_id);
+    if (desiredLead !== undefined) {
+      await ctx.repo.deleteEventReminders(event_id);
+      if (desiredLead && desiredLead > 0) {
+        const remAt = new Date(event.start.getTime() - desiredLead * 60_000);
+        if (remAt.getTime() > ctx.now.getTime()) {
+          await ctx.repo.createTask({
+            title: `Reminder: ${event.title}`,
+            type: 'reminder',
+            reminderAt: remAt,
+            sourceEventId: event_id,
+            reminderLeadMinutes: desiredLead,
+          });
+          reminderNote = ` Reminder set ${desiredLead} min before.`;
+        }
+      } else if (reminder_minutes_before === 0) {
+        reminderNote = ' Reminder removed.';
+      }
+    }
+    return `Updated on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
   },
 });
 
@@ -184,6 +233,8 @@ export const deleteCalendarEvent = defineTool({
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
     await ctx.calendar.deleteEvent(input.event_id);
+    // Cancel any Telegram reminder tied to this event so it never fires late.
+    await ctx.repo.deleteEventReminders(input.event_id);
     return `Deleted calendar event ${input.event_id}.`;
   },
 });

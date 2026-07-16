@@ -51,7 +51,8 @@ export class TelegramConnectionService {
         telegramBotTokenEnc: this.crypto.encrypt(botToken),
         telegramWebhookSecretEnc: this.crypto.encrypt(secret),
         telegramBotUsername: botUsername,
-        telegramChatId: null, // rebind on the next first message
+        telegramBindCode: randomBytes(16).toString('hex'), // fresh deep-link code
+        telegramChatId: null, // rebind on the next first message (with the code)
       },
     });
     this.logger.log(`Telegram connected for client ${clientId} (@${botUsername})`);
@@ -59,14 +60,14 @@ export class TelegramConnectionService {
   }
 
   /**
-   * Clears which Telegram chat is bound to this client, so the next person to
-   * message the bot binds instead. Use if the wrong chat bound to a client's
-   * bot — a super-admin access-control safety valve.
+   * Clears the bound chat AND issues a fresh bind code (invalidating the old
+   * deep link), so only someone with the NEW link can bind. Super-admin
+   * access-control safety valve.
    */
   async resetChatBinding(clientId: string): Promise<void> {
     await this.prisma.client.update({
       where: { id: clientId },
-      data: { telegramChatId: null },
+      data: { telegramChatId: null, telegramBindCode: randomBytes(16).toString('hex') },
     });
     this.logger.log(`Telegram chat binding reset for client ${clientId}`);
   }

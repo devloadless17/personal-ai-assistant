@@ -55,6 +55,11 @@ model Client {
   /// The bot's @username (public) — used to build the t.me link the admin
   /// sends to the client. Not a secret.
   telegramBotUsername String?
+  /// One-time bind code embedded in the t.me deep link (?start=<code>). Only a
+  /// first chat that presents this exact code may bind — so a leaked/guessed
+  /// bot link alone can't hijack the client's assistant. Regenerated on every
+  /// (re)connect and on reset-binding.
+  telegramBindCode    String?
   /// Chat id of the client's private chat with their bot
   telegramChatId      String?
   /// Secret token we set on the webhook; Telegram echoes it back on every
@@ -107,6 +112,14 @@ model Task {
   reminderAt   DateTime?
   reminderSent Boolean   @default(false)
 
+  /// If set, this task is a companion REMINDER for a Google Calendar event
+  /// (not a user-facing task). Lets us move/cancel it with the event and hide
+  /// it from task lists. Stores the Google event id.
+  sourceEventId String?
+  /// Lead time (minutes) for a calendar companion reminder, so a moved event
+  /// keeps the same lead.
+  reminderLeadMinutes Int?
+
   notes String?
 
   createdAt DateTime @default(now())
@@ -117,6 +130,8 @@ model Task {
   // Reminder cron: WHERE reminderSent = false AND reminderAt <= now()
   @@index([reminderSent, reminderAt])
   @@index([clientId, createdAt])
+  // Companion-reminder lookup on event move/delete
+  @@index([clientId, sourceEventId])
 }
 
 model Memory {

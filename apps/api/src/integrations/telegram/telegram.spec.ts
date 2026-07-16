@@ -24,6 +24,7 @@ const CLIENT: Client = {
   googleOAuthEnc: null,
   googleNeedsReauth: false,
   telegramBotUsername: null,
+  telegramBindCode: null,
   defaultReminderMinutes: 15,
   dailyBriefHour: 7,
   lastBriefDate: null,
@@ -136,6 +137,33 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
     const chains = (processor as unknown as { chains: Map<string, Promise<void>> }).chains;
     while (chains.has(clientId)) await chains.get(clientId);
   }
+
+  // ── Secure binding (F12): only a first chat presenting the /start <code> binds.
+  const UNBOUND: Client = { ...CLIENT, telegramChatId: null, telegramBindCode: 'secret-code' };
+
+  it('does NOT bind a first chat that lacks the correct start code', async () => {
+    const { processor, respond, sent } = makeProcessor(UNBOUND);
+    processor.enqueue(UNBOUND, makeUpdate({ text: 'hello' })); // no /start code
+    await flush(processor, UNBOUND.id);
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent[0]).toContain('link your administrator sent');
+  });
+
+  it('does NOT bind on a wrong start code', async () => {
+    const { processor, respond } = makeProcessor(UNBOUND);
+    processor.enqueue(UNBOUND, makeUpdate({ text: '/start wrong-code' }));
+    await flush(processor, UNBOUND.id);
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('binds a first chat that presents the correct start code, then welcomes', async () => {
+    const { processor, respond, sent } = makeProcessor(UNBOUND);
+    processor.enqueue(UNBOUND, makeUpdate({ text: '/start secret-code' }));
+    await flush(processor, UNBOUND.id);
+    // The /start message itself is not a request → agent not run this turn.
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent[0]).toContain('your assistant'); // welcome message
+  });
 
   it('processes a message end-to-end: dedup-save → agent → outbound → telegram send', async () => {
     const { processor, sent, saveMessage, respond } = makeProcessor(CLIENT);
