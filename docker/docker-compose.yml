@@ -1,0 +1,66 @@
+# Production stack for the VPS. Postgres is NOT part of this stack — it is
+# your existing Postgres on the same VPS; the api reaches it via DATABASE_URL.
+#
+#   cd docker && docker compose --env-file ../.env up -d --build
+#
+# For a Postgres running on the VPS host itself (not in Docker), use
+# host.docker.internal in DATABASE_URL (mapped below via extra_hosts), e.g.
+#   postgresql://user:pass@host.docker.internal:5432/assistant
+
+name: personal-ai-assistant
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    restart: always
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "3001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+    restart: always
+    environment:
+      NODE_ENV: production
+      # Server components call the API over the internal Docker network
+      API_URL: http://api:3001
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  proxy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

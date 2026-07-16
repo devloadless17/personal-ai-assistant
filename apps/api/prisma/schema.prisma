@@ -1,0 +1,154 @@
+// Multi-tenant Telegram AI executive assistant — data model.
+//
+// Tenancy rule: every client-owned model carries `clientId` and every query in
+// application code goes through the tenancy layer, which injects the clientId
+// filter. Composite indexes below match every hot access path so query plans
+// stay index-range scans regardless of table size (see plan: bounded,
+// windowed data access — no query ever fetches "all").
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ClientStatus {
+  active
+  disabled
+}
+
+enum TaskType {
+  task
+  reminder
+}
+
+enum TaskStatus {
+  open
+  done
+}
+
+enum MessageDirection {
+  inbound
+  outbound
+}
+
+model Client {
+  id        String       @id @default(cuid())
+  name      String
+  status    ClientStatus @default(active)
+  timezone  String // IANA, e.g. "Asia/Riyadh"
+
+  /// Assistant persona name filled into {{ASSISTANT_NAME}}
+  assistantName String @default("Assistant")
+
+  // ── Telegram (one dedicated bot per client) ──────────────────────────────
+  /// Bot token, AES-256-GCM encrypted at rest (format: iv:ciphertext:tag, hex)
+  telegramBotTokenEnc String?
+  /// Chat id of the client's private chat with their bot
+  telegramChatId      String?
+  /// Secret token we set on the webhook; Telegram echoes it back on every
+  /// update and we reject anything that doesn't match. Encrypted at rest.
+  telegramWebhookSecretEnc String?
+
+  // ── Google Calendar (per-client OAuth) ───────────────────────────────────
+  /// OAuth token bundle (refresh/access/expiry) as encrypted JSON
+  googleOAuthEnc String?
+  /// Set when a refresh fails permanently — client must re-authorize
+  googleNeedsReauth Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks     Task[]
+  memories  Memory[]
+  messages  Message[]
+  auditLogs AuditLog[]
+
+  @@index([status])
+}
+
+model Task {
+  id       String     @id @default(cuid())
+  clientId String
+  client   Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  title  String
+  type   TaskType   @default(task)
+  status TaskStatus @default(open)
+
+  /// Due date-time in UTC (interpreted/displayed in the client's timezone)
+  dueAt DateTime?
+
+  /// When to push a reminder to the client's Telegram (UTC)
+  reminderAt   DateTime?
+  reminderSent Boolean   @default(false)
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Windowed reads: "open tasks from today forward", "overdue", "done last month"
+  @@index([clientId, status, dueAt])
+  // Reminder cron: WHERE reminderSent = false AND reminderAt <= now()
+  @@index([reminderSent, reminderAt])
+  @@index([clientId, createdAt])
+}
+
+model Memory {
+  id       String @id @default(cuid())
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  key   String
+  value String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One value per key per client; upserts are the write path
+  @@unique([clientId, key])
+}
+
+model Message {
+  id       String           @id @default(cuid())
+  clientId String
+  client   Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  direction MessageDirection
+  content   String
+
+  createdAt DateTime @default(now())
+
+  // Context assembly: last N by (clientId, createdAt DESC) LIMIT N
+  @@index([clientId, createdAt])
+}
+
+model AuditLog {
+  id       String @id @default(cuid())
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  toolName String
+  input    Json
+  result   Json
+  success  Boolean
+
+  createdAt DateTime @default(now())
+
+  // Dashboard: cursor-paginated per-client log, filterable by tool/success
+  @@index([clientId, createdAt])
+  @@index([clientId, toolName, createdAt])
+}
+
+model AdminUser {
+  id           String @id @default(cuid())
+  email        String @unique
+  passwordHash String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,23 @@
+{
+  "name": "personal-ai-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant Telegram AI executive assistant — NestJS API + Next.js admin dashboard",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @assistant/api --filter @assistant/web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "e2e": "pnpm --filter @assistant/e2e test",
+    "db:migrate": "pnpm --filter @assistant/api db:migrate",
+    "db:studio": "pnpm --filter @assistant/api db:studio"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}

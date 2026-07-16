@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# environment — never commit secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# test artifacts
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# prisma
+apps/api/prisma/*.db
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# docker local overrides
+docker/compose.override.yml

@@ -1,0 +1,27 @@
+# Reverse proxy with automatic HTTPS (Let's Encrypt).
+#
+# Set DOMAIN in .env (e.g. assistant.example.com) and point the domain's DNS
+# A record at this VPS. Caddy provisions + renews the TLS certificate itself.
+#
+# Routing:
+#   /api/*  -> NestJS API   (Telegram webhooks, Google OAuth callback, admin API)
+#   /*      -> Next.js dashboard
+
+{$DOMAIN} {
+	# API — strip the /api prefix before proxying
+	handle_path /api/* {
+		reverse_proxy api:3001
+	}
+
+	# Everything else — admin dashboard
+	handle {
+		reverse_proxy web:3000
+	}
+
+	encode gzip
+
+	log {
+		output stdout
+		format json
+	}
+}
