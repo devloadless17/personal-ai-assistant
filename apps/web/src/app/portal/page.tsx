@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ClientMe, PortalEvent, PortalMemory, PortalTask } from "@assistant/shared";
 import { clearClientToken, getClientToken, portalApi } from "@/lib/portal-client";
@@ -97,34 +97,7 @@ export default function PortalPage() {
       <ChatOnTelegram me={me} />
       <Preferences me={me} onChanged={load} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Upcoming — next 7 days</CardTitle>
-          <CardDescription>
-            Live from your Google Calendar, including events you add there directly.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!calendar?.connected ? (
-            <p className="text-sm text-muted-foreground">
-              Calendar not linked yet — sign in with Google again to grant access.
-            </p>
-          ) : calendar.events.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing scheduled. Enjoy the clear week!</p>
-          ) : (
-            <ul className="space-y-2" data-testid="calendar-list">
-              {calendar.events.map((e) => (
-                <li key={e.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
-                  <span className="text-sm font-medium">{e.title}</span>
-                  <span className="whitespace-nowrap text-xs text-muted-foreground">
-                    {formatWhen(e, me.timezone)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+      <MonthCalendar me={me} tasks={tasks} calendarConnected={calendar?.connected ?? false} />
 
       {tasks.some((t) => t.recurrence) && (
         <Card>
@@ -277,6 +250,212 @@ function AssistantMemory({
   );
 }
 
+type DayItem = { label: string; kind: "meeting" | "event" | "task" | "reminder"; time?: string; sort: number };
+
+const KIND_STYLE: Record<DayItem["kind"], string> = {
+  meeting: "bg-blue-100 text-blue-800 dark:bg-blue-500/25 dark:text-blue-200",
+  event: "bg-sky-100 text-sky-800 dark:bg-sky-500/25 dark:text-sky-200",
+  task: "bg-amber-100 text-amber-900 dark:bg-amber-500/25 dark:text-amber-200",
+  reminder: "bg-emerald-100 text-emerald-900 dark:bg-emerald-500/25 dark:text-emerald-200",
+};
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+function localYMD(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(iso));
+}
+
+function MonthCalendar({
+  me,
+  tasks,
+  calendarConnected,
+}: {
+  me: ClientMe;
+  tasks: PortalTask[];
+  calendarConnected: boolean;
+}) {
+  const tz = me.timezone;
+  const todayKey = localYMD(new Date().toISOString(), tz);
+  const [ym, setYm] = useState(() => {
+    const [y, m] = todayKey.split("-").map(Number);
+    return { y: y!, m: m! - 1 }; // month 0-indexed
+  });
+  const [events, setEvents] = useState<PortalEvent[]>([]);
+
+  // 6-week grid (42 cells) starting on the Sunday on/before the 1st.
+  const cells = useMemo(() => {
+    const first = new Date(Date.UTC(ym.y, ym.m, 1));
+    const start = new Date(Date.UTC(ym.y, ym.m, 1 - first.getUTCDay()));
+    return Array.from({ length: 42 }, (_, i) => {
+      const dt = new Date(start.getTime() + i * 86_400_000);
+      const y = dt.getUTCFullYear();
+      const m = dt.getUTCMonth();
+      const d = dt.getUTCDate();
+      return { y, m, d, inMonth: m === ym.m, key: `${y}-${pad2(m + 1)}-${pad2(d)}` };
+    });
+  }, [ym]);
+
+  useEffect(() => {
+    if (!calendarConnected) return;
+    const from = new Date(Date.UTC(cells[0]!.y, cells[0]!.m, cells[0]!.d)).toISOString();
+    const to = new Date(Date.UTC(cells[41]!.y, cells[41]!.m, cells[41]!.d + 1)).toISOString();
+    let cancelled = false;
+    portalApi<{ connected: boolean; events: PortalEvent[] }>(
+      `/client/calendar?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    )
+      .then((r) => {
+        if (!cancelled) setEvents(r.events);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [cells, calendarConnected]);
+
+  // Bucket every item (meetings/events + tasks/reminders) onto its local day.
+  const byDay = useMemo(() => {
+    const map = new Map<string, DayItem[]>();
+    const add = (key: string, item: DayItem) => {
+      const arr = map.get(key) ?? [];
+      arr.push(item);
+      map.set(key, arr);
+    };
+    for (const e of events) {
+      add(localYMD(e.start, tz), {
+        label: e.title,
+        kind: e.attendees && e.attendees.length > 0 ? "meeting" : "event",
+        time: e.allDay ? undefined : formatTime(e.start, tz),
+        sort: new Date(e.start).getTime(),
+      });
+    }
+    for (const t of tasks) {
+      const iso = t.dueAt ?? t.reminderAt;
+      if (!iso) continue;
+      add(localYMD(iso, tz), {
+        label: t.title,
+        kind: t.type === "reminder" ? "reminder" : "task",
+        time: formatTime(iso, tz),
+        sort: new Date(iso).getTime(),
+      });
+    }
+    for (const arr of map.values()) arr.sort((a, b) => a.sort - b.sort);
+    return map;
+  }, [events, tasks, tz]);
+
+  const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(
+    new Date(Date.UTC(ym.y, ym.m, 1)),
+  );
+  const shift = (delta: number) => {
+    const total = ym.y * 12 + ym.m + delta;
+    setYm({ y: Math.floor(total / 12), m: ((total % 12) + 12) % 12 });
+  };
+  const goToday = () => {
+    const [y, m] = todayKey.split("-").map(Number);
+    setYm({ y: y!, m: m! - 1 });
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle>{monthLabel}</CardTitle>
+        <div className="flex items-center gap-1">
+          <Button variant="outline" size="sm" onClick={goToday}>
+            Today
+          </Button>
+          <Button variant="ghost" size="icon-sm" aria-label="Previous month" onClick={() => shift(-1)}>
+            ‹
+          </Button>
+          <Button variant="ghost" size="icon-sm" aria-label="Next month" onClick={() => shift(1)}>
+            ›
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!calendarConnected && (
+          <p className="mb-2 text-xs text-muted-foreground">
+            Calendar not linked — meetings won&apos;t show until you sign in with Google. Tasks and
+            reminders still appear below.
+          </p>
+        )}
+        <div className="overflow-x-auto">
+          <div className="min-w-[560px]">
+            <div className="grid grid-cols-7 border-b text-center text-[11px] font-medium text-muted-foreground">
+              {WEEKDAYS.map((w) => (
+                <div key={w} className="py-1.5">
+                  {w}
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-7">
+              {cells.map((c) => {
+                const items = byDay.get(c.key) ?? [];
+                const isToday = c.key === todayKey;
+                return (
+                  <div
+                    key={c.key}
+                    className={`min-h-[92px] border-b border-r p-1 ${
+                      c.inMonth ? "" : "bg-muted/30 text-muted-foreground"
+                    }`}
+                  >
+                    <div className="mb-1 flex justify-end">
+                      <span
+                        className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-xs ${
+                          isToday ? "bg-primary font-semibold text-primary-foreground" : ""
+                        }`}
+                      >
+                        {c.d}
+                      </span>
+                    </div>
+                    <div className="space-y-0.5">
+                      {items.slice(0, 3).map((it, i) => (
+                        <div
+                          key={i}
+                          title={`${it.time ? `${it.time} · ` : ""}${it.label}`}
+                          className={`truncate rounded px-1 py-0.5 text-[10px] leading-tight ${KIND_STYLE[it.kind]}`}
+                        >
+                          {it.time ? `${it.time} ` : ""}
+                          {it.label}
+                        </div>
+                      ))}
+                      {items.length > 3 && (
+                        <div className="px-1 text-[10px] text-muted-foreground">
+                          +{items.length - 3} more
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+          <Legend className="bg-blue-500/60" label="Meeting" />
+          <Legend className="bg-sky-500/60" label="Event" />
+          <Legend className="bg-amber-500/70" label="Task" />
+          <Legend className="bg-emerald-500/70" label="Reminder" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Legend({ className, label }: { className: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`inline-block h-2.5 w-2.5 rounded-sm ${className}`} />
+      {label}
+    </span>
+  );
+}
+
 function ChatOnTelegram({ me }: { me: ClientMe }) {
   // Before binding: the secure deep link (with code). After binding: the plain
   // bot link (they're already connected).
@@ -406,25 +585,6 @@ function formatHour(h: number): string {
   const period = h < 12 ? "AM" : "PM";
   const display = h % 12 === 0 ? 12 : h % 12;
   return `${display}:00 ${period}`;
-}
-
-function formatWhen(e: PortalEvent, tz: string): string {
-  if (e.allDay) return `All day · ${formatDate(e.start, tz)}`;
-  // Show start → end. Same local day → end as time only; else full date.
-  const end = sameLocalDay(e.start, e.end, tz)
-    ? formatTime(e.end, tz)
-    : formatDate(e.end, tz);
-  return `${formatDate(e.start, tz)} → ${end}`;
-}
-
-function sameLocalDay(a: string, b: string, tz: string): boolean {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  return fmt.format(new Date(a)) === fmt.format(new Date(b));
 }
 
 function formatTime(iso: string, tz: string): string {

@@ -77,6 +77,8 @@ export interface PortalEvent {
   end: string;
   allDay: boolean;
   location: string | null;
+  attendees: string[];
+  recurring: boolean;
 }
 
 export type MemoryCategory = 'PROFILE' | 'PREFERENCE' | 'LONGTERM';

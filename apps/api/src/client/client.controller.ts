@@ -219,6 +219,8 @@ export class ClientController {
         end: e.end.toISOString(),
         allDay: e.allDay,
         location: e.location ?? null,
+        attendees: e.attendees ?? [],
+        recurring: e.recurring ?? false,
       })),
     };
   }
