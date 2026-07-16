@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { GoogleModule } from '../integrations/google/google.module';
-import { TelegramModule } from '../integrations/telegram/telegram.module';
 import { ClientAuthGuard } from './client-auth.guard';
 import { ClientAuthService } from './client-auth.service';
 import { ClientController } from './client.controller';
@@ -11,7 +10,6 @@ import type { Env } from '../config/env.validation';
 @Module({
   imports: [
     GoogleModule,
-    TelegramModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({

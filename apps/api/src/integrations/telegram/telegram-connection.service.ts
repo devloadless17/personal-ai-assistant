@@ -50,10 +50,39 @@ export class TelegramConnectionService {
       data: {
         telegramBotTokenEnc: this.crypto.encrypt(botToken),
         telegramWebhookSecretEnc: this.crypto.encrypt(secret),
+        telegramBotUsername: botUsername,
         telegramChatId: null, // rebind on the next first message
       },
     });
     this.logger.log(`Telegram connected for client ${clientId} (@${botUsername})`);
     return { botUsername };
+  }
+
+  /**
+   * Clears which Telegram chat is bound to this client, so the next person to
+   * message the bot binds instead. Use if the wrong chat bound to a client's
+   * bot — a super-admin access-control safety valve.
+   */
+  async resetChatBinding(clientId: string): Promise<void> {
+    await this.prisma.client.update({
+      where: { id: clientId },
+      data: { telegramChatId: null },
+    });
+    this.logger.log(`Telegram chat binding reset for client ${clientId}`);
+  }
+
+  /**
+   * Best-effort: remove the bot's webhook so it stops receiving updates.
+   * Used when deleting a client — a failure here must not block the delete.
+   */
+  async removeWebhook(botTokenEnc: string | null): Promise<void> {
+    if (!botTokenEnc) return;
+    try {
+      await this.telegram.deleteWebhook(this.crypto.decrypt(botTokenEnc));
+    } catch (err) {
+      this.logger.warn(
+        `Failed to remove webhook during cleanup: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

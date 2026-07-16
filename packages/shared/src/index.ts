@@ -28,8 +28,12 @@ export interface ClientSummary {
   assistantName: string;
   email: string | null;
   telegramConnected: boolean;
+  telegramBotUsername: string | null;
+  telegramChatBound: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
+  defaultReminderMinutes: number;
+  dailyBriefHour: number;
   createdAt: string;
 }
 
@@ -40,8 +44,11 @@ export interface ClientMe {
   assistantName: string;
   timezone: string;
   telegramConnected: boolean;
+  telegramBotUsername: string | null;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
+  defaultReminderMinutes: number;
+  dailyBriefHour: number;
 }
 
 /** A task row shown in the client portal. */

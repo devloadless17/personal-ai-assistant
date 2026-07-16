@@ -52,6 +52,9 @@ model Client {
   // ── Telegram (one dedicated bot per client) ──────────────────────────────
   /// Bot token, AES-256-GCM encrypted at rest (format: iv:ciphertext:tag, hex)
   telegramBotTokenEnc String?
+  /// The bot's @username (public) — used to build the t.me link the admin
+  /// sends to the client. Not a secret.
+  telegramBotUsername String?
   /// Chat id of the client's private chat with their bot
   telegramChatId      String?
   /// Secret token we set on the webhook; Telegram echoes it back on every
@@ -63,6 +66,12 @@ model Client {
   googleOAuthEnc String?
   /// Set when a refresh fails permanently — client must re-authorize
   googleNeedsReauth Boolean @default(false)
+
+  // ── Reminder preferences ───────────────────────────────────────────────────
+  /// Default lead time (minutes before a task's due time) to send a reminder.
+  /// The client can change this ("always remind me 30 minutes before") and can
+  /// override it per task in chat. 0 = don't add reminders automatically.
+  defaultReminderMinutes Int @default(15)
 
   // ── Daily brief ──────────────────────────────────────────────────────────
   /// Local hour (0-23) to send the morning brief

@@ -23,6 +23,8 @@ const CLIENT: Client = {
   telegramWebhookSecretEnc: 'enc-secret',
   googleOAuthEnc: null,
   googleNeedsReauth: false,
+  telegramBotUsername: null,
+  defaultReminderMinutes: 15,
   dailyBriefHour: 7,
   lastBriefDate: null,
   createdAt: new Date(),

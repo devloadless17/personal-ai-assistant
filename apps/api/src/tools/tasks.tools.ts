@@ -3,6 +3,29 @@ import type { Task } from '@prisma/client';
 import { defineTool } from './tool.types';
 import { formatInTz, isoDateTime } from './time';
 
+/**
+ * Resolve the reminder time from either an absolute time or a lead offset.
+ * `changed: false` means neither was supplied → leave the reminder as-is.
+ */
+type ReminderResolution =
+  | { changed: false }
+  | { changed: true; value: Date | null }
+  | { error: string };
+
+function resolveReminderAt(
+  reminderAt: Date | null | undefined,
+  minutesBefore: number | null | undefined,
+  dueAt: Date | null | undefined,
+): ReminderResolution {
+  if (reminderAt !== undefined) return { changed: true, value: reminderAt };
+  if (minutesBefore === undefined) return { changed: false };
+  if (minutesBefore === null) return { changed: true, value: null }; // clear
+  if (!dueAt) {
+    return { error: 'a reminder lead time needs a due time — set due_at as well' };
+  }
+  return { changed: true, value: new Date(dueAt.getTime() - minutesBefore * 60_000) };
+}
+
 function renderTask(t: Task, tz: string): string {
   const bits = [
     `[id:${t.id}] ${t.title}`,
@@ -47,22 +70,33 @@ export const getTasks = defineTool({
 export const createTask = defineTool({
   name: 'create_task',
   description:
-    'Create a task or reminder in the client\'s task list (NOT on the calendar — calendar events are separate). Use type "reminder" with reminder_at when the client wants to be pinged on Telegram at a specific time.',
+    "Create a task or reminder in the client's task list (NOT on the calendar — calendar events are separate). To send a Telegram reminder, use reminder_minutes_before (e.g. 15 = ping 15 min before due) — this respects the client's preferred lead time — or reminder_at for an exact time.",
   schema: z.object({
     title: z.string().min(1).max(500).describe('Short task title.'),
     type: z.enum(['task', 'reminder']).optional().describe('Default: task.'),
     due_at: isoDateTime.optional().describe('Due datetime (ISO 8601), if any.'),
+    reminder_minutes_before: z
+      .number()
+      .int()
+      .min(0)
+      .max(10080)
+      .optional()
+      .describe(
+        "Minutes before due_at to send a reminder. Prefer this. Use the client's default lead time unless they specify a different one for this task.",
+      ),
     reminder_at: isoDateTime
       .optional()
-      .describe('When to send a Telegram reminder (ISO 8601), if the client asked for one.'),
+      .describe('Exact reminder datetime (ISO 8601). Use only when the client names a specific time.'),
     notes: z.string().max(2000).optional().describe('Extra details, if any.'),
   }),
   async execute(input, ctx) {
+    const rem = resolveReminderAt(input.reminder_at, input.reminder_minutes_before, input.due_at);
+    if ('error' in rem) return `ERROR: ${rem.error}. Nothing was created.`;
     const task = await ctx.repo.createTask({
       title: input.title,
       type: input.type,
       dueAt: input.due_at ?? null,
-      reminderAt: input.reminder_at ?? null,
+      reminderAt: rem.changed ? rem.value : null,
       notes: input.notes ?? null,
     });
     return `Created: ${renderTask(task, ctx.client.timezone)}`;
@@ -79,19 +113,35 @@ export const updateTask = defineTool({
     type: z.enum(['task', 'reminder']).optional(),
     status: z.enum(['open', 'done']).optional().describe('Set "open" to reopen a done task.'),
     due_at: isoDateTime.nullable().optional().describe('New due datetime, or null to clear.'),
+    reminder_minutes_before: z
+      .number()
+      .int()
+      .min(0)
+      .max(10080)
+      .nullable()
+      .optional()
+      .describe('New reminder lead time in minutes before due, or null to clear the reminder.'),
     reminder_at: isoDateTime
       .nullable()
       .optional()
-      .describe('New reminder datetime, or null to clear.'),
+      .describe('New exact reminder datetime, or null to clear.'),
     notes: z.string().max(2000).nullable().optional(),
   }),
   async execute(input, ctx) {
-    const { task_id, due_at, reminder_at, ...rest } = input;
+    const { task_id, due_at, reminder_at, reminder_minutes_before, ...rest } = input;
+    // For a lead-time reminder we need the due time (new or existing).
+    let dueRef = due_at;
+    if (reminder_minutes_before !== undefined && reminder_minutes_before !== null && due_at === undefined) {
+      const existing = await ctx.repo.findTaskById(task_id);
+      dueRef = existing?.dueAt ?? null;
+    }
+    const rem = resolveReminderAt(reminder_at, reminder_minutes_before, dueRef);
+    if ('error' in rem) return `ERROR: ${rem.error}. Nothing was changed.`;
     const task = await ctx.repo.updateTask(task_id, {
       ...rest,
       ...(due_at !== undefined ? { dueAt: due_at } : {}),
-      ...(reminder_at !== undefined
-        ? { reminderAt: reminder_at, reminderSent: false } // rescheduled reminder re-arms
+      ...(rem.changed
+        ? { reminderAt: rem.value, reminderSent: false } // rescheduled reminder re-arms
         : {}),
     });
     if (!task) return `ERROR: no task with id ${task_id} exists for this client. Nothing was changed.`;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ClientSummary } from "@assistant/shared";
 import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
@@ -24,10 +25,158 @@ export function SetupTab({
 }) {
   return (
     <div className="space-y-4">
+      <EditClientCard client={client} onChanged={onChanged} />
       <TelegramCard client={client} onChanged={onChanged} />
       <GoogleCard client={client} />
+      <PreferencesCard client={client} onChanged={onChanged} />
       <StatusCard client={client} onChanged={onChanged} />
+      <DangerZoneCard client={client} />
     </div>
+  );
+}
+
+function EditClientCard({
+  client,
+  onChanged,
+}: {
+  client: ClientSummary;
+  onChanged: () => void | Promise<void>;
+}) {
+  const [name, setName] = useState(client.name);
+  const [assistantName, setAssistantName] = useState(client.assistantName);
+  const [timezone, setTimezone] = useState(client.timezone);
+  const [email, setEmail] = useState(client.email ?? "");
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setOk(false);
+    try {
+      await api(`/admin/clients/${client.id}`, {
+        method: "PATCH",
+        body: {
+          name,
+          assistantName,
+          timezone,
+          ...(email.trim() ? { email: email.trim() } : {}),
+        },
+      });
+      setOk(true);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Client details</CardTitle>
+        <CardDescription>Name, assistant name, timezone, and portal-login email.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="ed-name">Client name</Label>
+            <Input id="ed-name" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ed-an">Assistant name</Label>
+            <Input
+              id="ed-an"
+              value={assistantName}
+              onChange={(e) => setAssistantName(e.target.value)}
+              required
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ed-tz">Timezone (IANA)</Label>
+            <Input
+              id="ed-tz"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              required
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ed-email">Client&apos;s Gmail (portal login)</Label>
+            <Input
+              id="ed-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="client@gmail.com"
+            />
+          </div>
+          <div className="sm:col-span-2 flex items-center gap-3">
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save changes"}
+            </Button>
+            {ok && <span className="text-sm text-emerald-600 dark:text-emerald-400">Saved ✓</span>}
+            {error && (
+              <span className="text-sm text-red-600 dark:text-red-400" role="alert">
+                {error}
+              </span>
+            )}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DangerZoneCard({ client }: { client: ClientSummary }) {
+  const router = useRouter();
+  const [confirmText, setConfirmText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const armed = confirmText.trim().toLowerCase() === "delete";
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/admin/clients/${client.id}`, { method: "DELETE" });
+      router.push("/");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't delete");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="border-red-300 dark:border-red-900">
+      <CardHeader>
+        <CardTitle className="text-red-700 dark:text-red-400">Delete client</CardTitle>
+        <CardDescription>
+          Permanently removes {client.name}, their tasks, chat history, and audit log, and stops
+          their bot. This cannot be undone. To disable temporarily, use “Disable client” above
+          instead. Type <span className="font-mono font-semibold">delete</span> to confirm.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 sm:flex-row">
+        <Input
+          value={confirmText}
+          onChange={(e) => setConfirmText(e.target.value)}
+          placeholder="type: delete"
+          className="sm:max-w-48"
+        />
+        <Button variant="destructive" onClick={remove} disabled={!armed || busy}>
+          {busy ? "Deleting…" : "Delete permanently"}
+        </Button>
+        {error && (
+          <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+            {error}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -78,7 +227,10 @@ function TelegramCard({
           {client.telegramConnected && " Pasting a new token replaces the bot."}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        {client.telegramBotUsername && (
+          <ShareableBotLink client={client} onChanged={onChanged} />
+        )}
         <form onSubmit={connect} className="flex flex-col gap-3 sm:flex-row">
           <div className="flex-1">
             <Label htmlFor="bot-token" className="sr-only">
@@ -98,7 +250,165 @@ function TelegramCard({
             {busy ? "Connecting…" : client.telegramConnected ? "Replace bot" : "Connect"}
           </Button>
         </form>
-        {result && <p className="mt-3 text-sm text-emerald-600 dark:text-emerald-400">{result}</p>}
+        {result && <p className="text-sm text-emerald-600 dark:text-emerald-400">{result}</p>}
+        {error && (
+          <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+            {error}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ShareableBotLink({
+  client,
+  onChanged,
+}: {
+  client: ClientSummary;
+  onChanged: () => void | Promise<void>;
+}) {
+  const link = `https://t.me/${client.telegramBotUsername}`;
+  const [copied, setCopied] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
+
+  async function resetBinding() {
+    setResetting(true);
+    setResetMsg(null);
+    try {
+      await api(`/admin/clients/${client.id}/telegram/reset-binding`, { method: "POST" });
+      setResetMsg("Binding cleared — the next person to message the bot will be linked.");
+      await onChanged();
+    } catch {
+      setResetMsg("Couldn't reset the binding.");
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/40 p-3">
+      <p className="text-sm font-medium">Send this link to the client</p>
+      <p className="mb-2 text-xs text-muted-foreground">
+        They tap it, press Start, and begin chatting — no setup on their side. The first person to
+        message binds to this client{client.telegramChatBound ? " (already bound ✓)" : ""}.
+      </p>
+      <div className="flex items-center gap-2">
+        <Input readOnly value={link} className="font-mono text-xs" />
+        <Button
+          variant="secondary"
+          type="button"
+          onClick={async () => {
+            await navigator.clipboard.writeText(link);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }}
+        >
+          {copied ? "Copied ✓" : "Copy"}
+        </Button>
+      </div>
+      {client.telegramChatBound && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-2"
+          type="button"
+          onClick={resetBinding}
+          disabled={resetting}
+        >
+          {resetting ? "Resetting…" : "Reset chat binding"}
+        </Button>
+      )}
+      {resetMsg && <p className="mt-2 text-xs text-muted-foreground">{resetMsg}</p>}
+    </div>
+  );
+}
+
+function PreferencesCard({
+  client,
+  onChanged,
+}: {
+  client: ClientSummary;
+  onChanged: () => void | Promise<void>;
+}) {
+  const [reminder, setReminder] = useState(String(client.defaultReminderMinutes));
+  const [briefHour, setBriefHour] = useState(String(client.dailyBriefHour));
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setOk(false);
+    try {
+      await api(`/admin/clients/${client.id}`, {
+        method: "PATCH",
+        body: {
+          defaultReminderMinutes: Number(reminder),
+          dailyBriefHour: Number(briefHour),
+        },
+      });
+      setOk(true);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Defaults</CardTitle>
+        <CardDescription>
+          Starting reminder lead time and daily-summary hour. The client can change these
+          themselves (portal or by asking the assistant), and override any single reminder in chat.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={save} className="flex flex-col gap-4 sm:flex-row sm:items-end">
+          <div className="flex-1 space-y-1.5">
+            <Label htmlFor="pref-rem">Remind before tasks</Label>
+            <select
+              id="pref-rem"
+              className="w-full rounded-md border bg-background p-2 text-sm"
+              value={reminder}
+              onChange={(e) => setReminder(e.target.value)}
+            >
+              <option value="0">No automatic reminders</option>
+              <option value="5">5 minutes before</option>
+              <option value="10">10 minutes before</option>
+              <option value="15">15 minutes before</option>
+              <option value="30">30 minutes before</option>
+              <option value="60">1 hour before</option>
+              <option value="120">2 hours before</option>
+              <option value="1440">1 day before</option>
+            </select>
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <Label htmlFor="pref-brief">Daily summary at</Label>
+            <select
+              id="pref-brief"
+              className="w-full rounded-md border bg-background p-2 text-sm"
+              value={briefHour}
+              onChange={(e) => setBriefHour(e.target.value)}
+            >
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>
+                  {h % 12 === 0 ? 12 : h % 12}:00 {h < 12 ? "AM" : "PM"}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button type="submit" disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </form>
+        {ok && <p className="mt-3 text-sm text-emerald-600 dark:text-emerald-400">Saved ✓</p>}
         {error && (
           <p className="mt-3 text-sm text-red-600 dark:text-red-400" role="alert">
             {error}

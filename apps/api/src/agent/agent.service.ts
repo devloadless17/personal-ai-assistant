@@ -14,6 +14,42 @@ const MAX_TOOL_ITERATIONS = 8;
 /** Conversation context: last N messages. */
 const HISTORY_LIMIT = 30;
 
+/**
+ * Tools that CHANGE data. A reply claiming a completed action is only
+ * truthful if one of these ran successfully this turn.
+ */
+const MUTATING_TOOLS = new Set<string>([
+  'create_task',
+  'update_task',
+  'complete_task',
+  'delete_task',
+  'create_calendar_event',
+  'update_calendar_event',
+  'delete_calendar_event',
+  'save_memory',
+  'set_reminder_preference',
+]);
+
+/**
+ * Detects when the assistant ASSERTS it just completed/committed an action.
+ * Deliberately high-precision (first-person or leading-verb forms) so honest,
+ * negated replies like "nothing was changed" or "you have nothing scheduled"
+ * do NOT trigger it. Used only to catch a claimed change when NO mutating tool
+ * ran — the last line of defence against a model-hallucinated confirmation.
+ */
+const COMPLETION_CLAIM = new RegExp(
+  [
+    // Sentence that STARTS with a completion verb: "Added …", "Booked …".
+    "(^|[.!?]\\s+)(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done)\\b",
+    // First-person claim: "I added", "I've booked", "I'll set", "I have scheduled".
+    "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|remind)",
+    // Reminder confirmations.
+    "\\breminder(?:'?s)?\\s+(?:is\\s+|has\\s+been\\s+)?set\\b",
+    "\\bi'?ll\\s+(?:remind|ping)\\s+you\\b",
+  ].join("|"),
+  "i",
+);
+
 export interface CalendarGatewayFactory {
   /** Returns a gateway bound to this client's Google credentials, or null if not connected. */
   forClient(client: Client): Promise<CalendarGateway | null>;
@@ -99,6 +135,9 @@ export class AgentService {
     messages: Anthropic.MessageParam[],
     ctx: ToolContext,
   ): Promise<string> {
+    let successfulMutation = false;
+    let corrected = false;
+
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
       const response = await this.anthropic.createMessage({
         system,
@@ -115,7 +154,11 @@ export class AgentService {
 
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const use of toolUses) {
-          results.push(await this.executeTool(use, ctx));
+          const block = await this.executeTool(use, ctx);
+          results.push(block);
+          if (MUTATING_TOOLS.has(use.name) && block.is_error !== true) {
+            successfulMutation = true;
+          }
         }
         messages.push({ role: 'user', content: results });
         continue;
@@ -131,9 +174,26 @@ export class AgentService {
           'My answer got cut off — could you ask that again, maybe in smaller parts?'
         );
       }
-      // end_turn (or pause-equivalent): the reply is the model's text,
-      // grounded in the real tool results above.
+
+      // end_turn: the model is done. Before trusting the reply, enforce the
+      // core invariant BEHAVIOURALLY: if it claims a completed action but no
+      // mutating tool actually ran this turn, force it to either do it or drop
+      // the claim. One correction attempt, then we trust the corrected reply.
       const text = this.extractText(response);
+      if (text && !successfulMutation && !corrected && COMPLETION_CLAIM.test(text)) {
+        corrected = true;
+        this.logger.warn(
+          `Client ${ctx.client.id}: reply claimed an action with no tool call — forcing correction`,
+        );
+        messages.push({ role: 'assistant', content: response.content });
+        messages.push({
+          role: 'user',
+          content:
+            'SYSTEM CHECK: your last message told me something was done, but you did not call any tool this turn, so nothing actually happened. If I asked you to add, update, schedule, remind, complete, or delete something, call the correct tool NOW to really do it. If nothing needed changing, reply again WITHOUT claiming any action was completed.',
+        });
+        continue;
+      }
+
       if (text) return text;
       return 'I didn’t produce a reply — please try again.';
     }

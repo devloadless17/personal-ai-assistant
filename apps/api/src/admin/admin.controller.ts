@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -23,6 +24,7 @@ const createClientSchema = z.object({
   timezone: z.string().min(1),
   assistantName: z.string().min(1).max(100).default('Assistant'),
   email: z.string().email().toLowerCase().optional(),
+  defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });
 
@@ -32,6 +34,7 @@ const updateClientSchema = z.object({
   assistantName: z.string().min(1).max(100).optional(),
   email: z.string().email().toLowerCase().optional(),
   status: z.enum(['active', 'disabled']).optional(),
+  defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });
 
@@ -78,6 +81,14 @@ export class AdminController {
   }
 
   @UseGuards(AdminAuthGuard)
+  @Delete('clients/:id')
+  @HttpCode(200)
+  async remove(@Param('id') id: string): Promise<{ ok: true }> {
+    await this.clients.deleteClient(id);
+    return { ok: true };
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Post('clients/:id/telegram')
   async connectTelegram(
     @Param('id') id: string,
@@ -85,6 +96,14 @@ export class AdminController {
   ): Promise<{ botUsername: string }> {
     const input = connectTelegramSchema.parse(body);
     return this.clients.connectTelegram(id, input.botToken);
+  }
+
+  /** Clear the bound chat if the wrong person connected to a client's bot. */
+  @UseGuards(AdminAuthGuard)
+  @Post('clients/:id/telegram/reset-binding')
+  async resetTelegramBinding(@Param('id') id: string): Promise<{ ok: true }> {
+    await this.clients.resetTelegramBinding(id);
+    return { ok: true };
   }
 
   @UseGuards(AdminAuthGuard)

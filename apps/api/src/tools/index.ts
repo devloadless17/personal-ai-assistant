@@ -1,9 +1,10 @@
 import type { ToolDefinition } from './tool.types';
 import { completeTask, createTask, deleteTask, getTasks, updateTask } from './tasks.tools';
-import { getProfile, saveMemory } from './memory.tools';
+import { getProfile, saveMemory, setReminderPreference } from './memory.tools';
 import {
   createCalendarEvent,
   deleteCalendarEvent,
+  findFreeTime,
   getCalendarEvents,
   updateCalendarEvent,
 } from './calendar.tools';
@@ -23,9 +24,11 @@ export const ALL_TOOLS: ToolDefinition<never>[] = [
   completeTask,
   deleteTask,
   getCalendarEvents,
+  findFreeTime,
   createCalendarEvent,
   updateCalendarEvent,
   deleteCalendarEvent,
   getProfile,
   saveMemory,
+  setReminderPreference,
 ] as ToolDefinition<never>[];

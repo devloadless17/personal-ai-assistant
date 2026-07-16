@@ -54,16 +54,55 @@ async function conflictWarning(
   return renderConflicts(conflicts, ctx.client.timezone);
 }
 
+export const findFreeTime = defineTool({
+  name: 'find_free_time',
+  description:
+    'Find open time slots on the client\'s live calendar within a window. Use this to propose alternatives when a requested time is busy, or when the client asks "when am I free?". Returns the earliest open slots first.',
+  schema: z.object({
+    from: isoDateTime.describe('Earliest time to consider (ISO 8601).'),
+    to: isoDateTime.describe('Latest time to consider (ISO 8601).'),
+    duration_minutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(1440)
+      .describe('How long the slot needs to be, in minutes.'),
+    limit: z.number().int().min(1).max(10).optional().describe('Max slots to return (default 5).'),
+  }),
+  async execute(input, ctx) {
+    if (!ctx.calendar) return NOT_CONNECTED;
+    if (input.to <= input.from) return 'ERROR: "to" must be after "from".';
+    const slots = await ctx.calendar.findFreeSlots({
+      from: input.from,
+      to: input.to,
+      durationMinutes: input.duration_minutes,
+      limit: input.limit,
+    });
+    if (slots.length === 0) return 'No open slots of that length in that window.';
+    const tz = ctx.client.timezone;
+    return slots.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
+  },
+});
+
 export const createCalendarEvent = defineTool({
   name: 'create_calendar_event',
   description:
-    'Create an event on the client\'s Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms).',
+    "Create an event on the client's Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms). Set reminder_minutes_before to also send the client a Telegram reminder before the meeting — use their default lead time unless they say otherwise.",
   schema: z.object({
     title: z.string().min(1).max(300),
     start: isoDateTime.describe('Event start (ISO 8601).'),
     end: isoDateTime.describe('Event end (ISO 8601). Must be after start.'),
     description: z.string().max(2000).optional(),
     location: z.string().max(300).optional(),
+    reminder_minutes_before: z
+      .number()
+      .int()
+      .min(0)
+      .max(10080)
+      .optional()
+      .describe(
+        "Minutes before the meeting to send a Telegram reminder. Use the client's default lead time unless they specify otherwise; omit or 0 for no reminder.",
+      ),
     allow_conflict: z
       .boolean()
       .optional()
@@ -85,7 +124,22 @@ export const createCalendarEvent = defineTool({
       description: input.description,
       location: input.location,
     });
-    return `Created on calendar: ${renderEvent(event, ctx.client.timezone)}`;
+
+    let reminderNote = '';
+    if (input.reminder_minutes_before && input.reminder_minutes_before > 0) {
+      // A companion reminder in our DB drives the Telegram ping via the same
+      // reliable reminder cron the tasks use (the calendar itself is not polled).
+      const reminderAt = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
+      if (reminderAt.getTime() > ctx.now.getTime()) {
+        await ctx.repo.createTask({
+          title: `Reminder: ${input.title}`,
+          type: 'reminder',
+          reminderAt,
+        });
+        reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before.`;
+      }
+    }
+    return `Created on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
   },
 });
 

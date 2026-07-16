@@ -41,6 +41,16 @@ export interface CalendarGateway {
   deleteEvent(eventId: string): Promise<void>;
   /** Events overlapping [start, end) — conflict checking before create/move. */
   findConflicts(start: Date, end: Date, excludeEventId?: string): Promise<CalendarEvent[]>;
+  /**
+   * Open slots of at least `durationMinutes` within [from, to), so the
+   * assistant can propose alternatives instead of just reporting a clash.
+   */
+  findFreeSlots(params: {
+    from: Date;
+    to: Date;
+    durationMinutes: number;
+    limit?: number;
+  }): Promise<{ start: Date; end: Date }[]>;
 }
 
 export interface CalendarEvent {

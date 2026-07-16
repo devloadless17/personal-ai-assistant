@@ -3,7 +3,7 @@ import {
   Controller,
   Get,
   NotFoundException,
-  Post,
+  Patch,
   Query,
   Req,
   Res,
@@ -16,18 +16,26 @@ import { z } from 'zod';
 import type { ClientMe, PortalEvent, PortalTask } from '@assistant/shared';
 import { GoogleCalendarGateway } from '../integrations/google/google-calendar.gateway';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
-import { TelegramConnectionService } from '../integrations/telegram/telegram-connection.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenancyService } from '../tenancy/tenancy.service';
 import type { Env } from '../config/env.validation';
 import { ClientAuthGuard, type ClientRequest } from './client-auth.guard';
 import { ClientAuthService } from './client-auth.service';
 
-const connectTelegramSchema = z.object({ botToken: z.string().min(20) });
 const rangeSchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
 });
+
+// The client controls their own reminder lead time and daily-summary hour.
+const preferencesSchema = z
+  .object({
+    defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
+    dailyBriefHour: z.number().int().min(0).max(23).optional(),
+  })
+  .refine((v) => v.defaultReminderMinutes !== undefined || v.dailyBriefHour !== undefined, {
+    message: 'Provide at least one preference to update.',
+  });
 
 /**
  * Client self-service portal API. Every data route is guarded and reads the
@@ -41,7 +49,6 @@ export class ClientController {
     private readonly prisma: PrismaService,
     private readonly tenancy: TenancyService,
     private readonly google: GoogleOAuthService,
-    private readonly telegramConnection: TelegramConnectionService,
     private readonly config: ConfigService<Env, true>,
   ) {}
 
@@ -91,9 +98,21 @@ export class ClientController {
       assistantName: client.assistantName,
       timezone: client.timezone,
       telegramConnected: Boolean(client.telegramBotTokenEnc),
+      telegramBotUsername: client.telegramBotUsername,
       googleConnected: Boolean(client.googleOAuthEnc),
       googleNeedsReauth: client.googleNeedsReauth,
+      defaultReminderMinutes: client.defaultReminderMinutes,
+      dailyBriefHour: client.dailyBriefHour,
     };
+  }
+
+  /** The client sets their own reminder lead time and daily-summary hour. */
+  @UseGuards(ClientAuthGuard)
+  @Patch('preferences')
+  async updatePreferences(@Req() req: ClientRequest, @Body() body: unknown): Promise<ClientMe> {
+    const prefs = preferencesSchema.parse(body);
+    await this.prisma.client.update({ where: { id: req.client.sub }, data: prefs });
+    return this.me(req);
   }
 
   @UseGuards(ClientAuthGuard)
@@ -143,14 +162,4 @@ export class ClientController {
     };
   }
 
-  @UseGuards(ClientAuthGuard)
-  @Throttle({ default: { ttl: 60_000, limit: 10 } })
-  @Post('telegram')
-  async connectTelegram(
-    @Req() req: ClientRequest,
-    @Body() body: unknown,
-  ): Promise<{ botUsername: string }> {
-    const { botToken } = connectTelegramSchema.parse(body);
-    return this.telegramConnection.connect(req.client.sub, botToken);
-  }
 }

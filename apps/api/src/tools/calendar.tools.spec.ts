@@ -33,6 +33,7 @@ function makeGateway(existing: CalendarEvent[]): CalendarGateway & { created: Ca
           existing.filter((e) => e.id !== exclude && !e.allDay && e.start < end && e.end > start),
         ),
       ),
+    findFreeSlots: jest.fn().mockResolvedValue([]),
   };
 }
 

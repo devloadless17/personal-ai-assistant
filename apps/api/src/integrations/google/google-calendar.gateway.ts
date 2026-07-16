@@ -93,6 +93,40 @@ export class GoogleCalendarGateway implements CalendarGateway {
     );
   }
 
+  /**
+   * Open slots of at least `durationMinutes` within [from, to), computed from
+   * the LIVE calendar's busy blocks. Returns the earliest slots first so the
+   * assistant can offer the nearest alternatives on a conflict.
+   */
+  async findFreeSlots(params: {
+    from: Date;
+    to: Date;
+    durationMinutes: number;
+    limit?: number;
+  }): Promise<{ start: Date; end: Date }[]> {
+    const { from, to, durationMinutes, limit = 5 } = params;
+    const durationMs = durationMinutes * 60_000;
+    const busy = (await this.listEvents({ from, to, limit: 100 }))
+      .filter((e) => !e.allDay)
+      .map((e) => ({ start: e.start, end: e.end }))
+      .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+    const slots: { start: Date; end: Date }[] = [];
+    let cursor = from;
+    for (const block of busy) {
+      if (slots.length >= limit) break;
+      if (block.start.getTime() - cursor.getTime() >= durationMs) {
+        slots.push({ start: cursor, end: new Date(cursor.getTime() + durationMs) });
+      }
+      if (block.end > cursor) cursor = block.end;
+    }
+    // Trailing gap after the last busy block.
+    if (slots.length < limit && to.getTime() - cursor.getTime() >= durationMs) {
+      slots.push({ start: cursor, end: new Date(cursor.getTime() + durationMs) });
+    }
+    return slots.slice(0, limit);
+  }
+
   private toEvent(e: calendar_v3.Schema$Event): CalendarEvent {
     const allDay = Boolean(e.start?.date && !e.start.dateTime);
     const start = e.start?.dateTime ?? e.start?.date;

@@ -19,8 +19,12 @@ function summarize(c: Client): ClientSummary {
     assistantName: c.assistantName,
     email: c.email,
     telegramConnected: Boolean(c.telegramBotTokenEnc),
+    telegramBotUsername: c.telegramBotUsername,
+    telegramChatBound: Boolean(c.telegramChatId),
     googleConnected: Boolean(c.googleOAuthEnc),
     googleNeedsReauth: c.googleNeedsReauth,
+    defaultReminderMinutes: c.defaultReminderMinutes,
+    dailyBriefHour: c.dailyBriefHour,
     createdAt: c.createdAt.toISOString(),
   };
 }
@@ -52,6 +56,7 @@ export class AdminClientsService {
     timezone: string;
     assistantName: string;
     email?: string;
+    defaultReminderMinutes?: number;
     dailyBriefHour?: number;
   }): Promise<ClientSummary> {
     this.assertValidTimezone(data.timezone);
@@ -68,6 +73,7 @@ export class AdminClientsService {
       assistantName: string;
       email: string;
       status: 'active' | 'disabled';
+      defaultReminderMinutes: number;
       dailyBriefHour: number;
     }>,
   ): Promise<ClientSummary> {
@@ -80,9 +86,36 @@ export class AdminClientsService {
     }
   }
 
-  /** Connect a client's Telegram bot (shared with the client portal). */
+  /** Connect a client's Telegram bot (admin-only — the admin holds the token). */
   async connectTelegram(id: string, botToken: string): Promise<{ botUsername: string }> {
     return this.telegramConnection.connect(id, botToken);
+  }
+
+  /** Clear the bound Telegram chat so the intended client can (re)bind. */
+  async resetTelegramBinding(id: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({ where: { id } });
+    if (!client) throw new NotFoundException('Client not found');
+    await this.telegramConnection.resetChatBinding(id);
+  }
+
+  /**
+   * Permanently delete a client and ALL their data (tasks, messages, memories,
+   * and audit history). Deliberate and irreversible — the UI confirms first.
+   * Silences the client's bot, then deletes atomically. Audit rows are removed
+   * inside the transaction (the RESTRICT FK guards against accidental cascade,
+   * not against this explicit, owner-initiated removal).
+   */
+  async deleteClient(id: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({ where: { id } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    await this.telegramConnection.removeWebhook(client.telegramBotTokenEnc);
+    await this.prisma.$transaction([
+      this.prisma.auditLog.deleteMany({ where: { clientId: id } }),
+      // Tasks, memories, messages cascade on client delete.
+      this.prisma.client.delete({ where: { id } }),
+    ]);
+    this.logger.warn(`Client permanently deleted: ${id} (${client.name})`);
   }
 
   /** Admin fetches this URL and sends it to the client (e.g. via their bot). */

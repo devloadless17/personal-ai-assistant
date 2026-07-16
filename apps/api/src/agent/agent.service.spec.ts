@@ -29,6 +29,8 @@ const CLIENT: Client = {
   telegramWebhookSecretEnc: null,
   googleOAuthEnc: null,
   googleNeedsReauth: false,
+  telegramBotUsername: null,
+  defaultReminderMinutes: 15,
   dailyBriefHour: 7,
   lastBriefDate: null,
   createdAt: new Date(),
@@ -241,6 +243,59 @@ describe('AgentService — reliability invariants', () => {
       messages: Anthropic.MessageParam[];
     };
     expect(JSON.stringify(secondCall.messages)).toContain('not connected');
+  });
+
+  it('catches a hallucinated confirmation: claim with NO tool call forces a correction', async () => {
+    const { repo, state } = makeFakeRepo();
+    // 1st: model claims "Added a reminder" but calls NO tool.
+    // After the forced correction, it actually calls create_task, then confirms.
+    const { agent, createMessage } = makeAgent(
+      [
+        textResponse("Added a reminder to pray at 7:00 PM today. I'll ping you 15 min before."),
+        toolUseResponse('create_task', { title: 'Pray', type: 'reminder' }),
+        textResponse('Done — reminder set to pray at 7:00 PM.'),
+      ],
+      repo,
+    );
+
+    const reply = await agent.respond(CLIENT);
+
+    // The correction fired (3 model calls), the REAL tool ran and was audited,
+    // and the final reply reflects the real action — not the initial fabrication.
+    expect(createMessage).toHaveBeenCalledTimes(3);
+    expect(state.tasks).toHaveLength(1);
+    expect(state.audits).toEqual([
+      expect.objectContaining({ toolName: 'create_task', success: true }),
+    ]);
+    // The correction instruction was injected before the real tool call.
+    const secondCall = createMessage.mock.calls[1]?.[0] as { messages: Anthropic.MessageParam[] };
+    expect(JSON.stringify(secondCall.messages)).toContain('SYSTEM CHECK');
+    expect(reply).toBe('Done — reminder set to pray at 7:00 PM.');
+  });
+
+  it('does not "correct" a legitimate reply that claims nothing was done', async () => {
+    const { repo } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [textResponse('You have nothing scheduled this afternoon.')],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(1); // no correction round
+    expect(reply).toBe('You have nothing scheduled this afternoon.');
+  });
+
+  it('a real mutation followed by a completion claim is trusted (no correction)', async () => {
+    const { repo } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [
+        toolUseResponse('create_task', { title: 'buy milk' }),
+        textResponse('Added "buy milk" to your tasks.'),
+      ],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(2); // no extra correction round
+    expect(reply).toBe('Added "buy milk" to your tasks.');
   });
 
   it('anthropic API failure returns an honest error, never a fake success', async () => {
