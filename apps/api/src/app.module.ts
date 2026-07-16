@@ -7,6 +7,7 @@ import { DevModule } from './dev/dev.module';
 import { HealthModule } from './health/health.module';
 import { GoogleModule } from './integrations/google/google.module';
 import { TelegramModule } from './integrations/telegram/telegram.module';
+import { JobsModule } from './jobs/jobs.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { TenancyModule } from './tenancy/tenancy.module';
 
@@ -24,6 +25,7 @@ import { TenancyModule } from './tenancy/tenancy.module';
     AgentModule,
     TelegramModule,
     GoogleModule,
+    JobsModule,
     HealthModule,
     // Dev-only chat harness — never registered outside development.
     ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),

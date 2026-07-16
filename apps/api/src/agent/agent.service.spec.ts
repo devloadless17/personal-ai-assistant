@@ -28,6 +28,8 @@ const CLIENT: Client = {
   telegramWebhookSecretEnc: null,
   googleOAuthEnc: null,
   googleNeedsReauth: false,
+  dailyBriefHour: 7,
+  lastBriefDate: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };

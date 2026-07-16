@@ -59,6 +59,13 @@ model Client {
   /// Set when a refresh fails permanently — client must re-authorize
   googleNeedsReauth Boolean @default(false)
 
+  // ── Daily brief ──────────────────────────────────────────────────────────
+  /// Local hour (0-23) to send the morning brief
+  dailyBriefHour Int @default(7)
+  /// Last local date ("YYYY-MM-DD" in the client's tz) a brief was sent —
+  /// idempotency marker so restarts/re-runs can never double-send
+  lastBriefDate String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
