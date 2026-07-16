@@ -272,6 +272,39 @@ function localYMD(iso: string, tz: string): string {
   }).format(new Date(iso));
 }
 
+type GridCell = { y: number; m: number; d: number; inMonth: boolean; key: string };
+
+/** Does a recurring task occur on this calendar cell? Mirrors the server's
+ * recurrence rules so the calendar shows EVERY occurrence, not just the next. */
+function taskOccursOn(cell: GridCell, t: PortalTask, tz: string): boolean {
+  const freq = t.recurrenceFreq;
+  if (!freq) return false;
+  const base = t.recurrenceAnchor ?? t.reminderAt ?? t.dueAt;
+  if (!base) return false;
+  const [ay, am, ad] = localYMD(base, tz).split("-").map(Number);
+  const anchorNum = Date.UTC(ay!, am! - 1, ad!);
+  const cellNum = Date.UTC(cell.y, cell.m, cell.d);
+  if (cellNum < anchorNum) return false; // before the series began
+  if (t.recurrenceUntil) {
+    const [uy, um, ud] = localYMD(t.recurrenceUntil, tz).split("-").map(Number);
+    if (cellNum > Date.UTC(uy!, um! - 1, ud!)) return false;
+  }
+  const interval = Math.max(1, t.recurrenceInterval || 1);
+  const DAY = 86_400_000;
+  const cellWeekday = new Date(cellNum).getUTCDay();
+  if (freq === "DAILY") return ((cellNum - anchorNum) / DAY) % interval === 0;
+  if (freq === "WEEKLY") {
+    if (t.recurrenceWeekdays.length > 0) return t.recurrenceWeekdays.includes(cellWeekday);
+    const days = (cellNum - anchorNum) / DAY;
+    return days % 7 === 0 && (days / 7) % interval === 0;
+  }
+  // MONTHLY: the anchor day-of-month (clamped for short months), every N months.
+  const daysInCellMonth = new Date(Date.UTC(cell.y, cell.m + 1, 0)).getUTCDate();
+  if (cell.d !== Math.min(ad!, daysInCellMonth)) return false;
+  const months = (cell.y - ay!) * 12 + (cell.m - (am! - 1));
+  return months >= 0 && months % interval === 0;
+}
+
 function MonthCalendar({
   me,
   tasks,
@@ -332,22 +365,28 @@ function MonthCalendar({
         label: e.title,
         kind: e.attendees && e.attendees.length > 0 ? "meeting" : "event",
         time: e.allDay ? undefined : formatTime(e.start, tz),
-        sort: new Date(e.start).getTime(),
+        sort: e.allDay ? -1 : new Date(e.start).getTime() % 86_400_000,
       });
     }
     for (const t of tasks) {
-      const iso = t.dueAt ?? t.reminderAt;
-      if (!iso) continue;
-      add(localYMD(iso, tz), {
-        label: t.title,
-        kind: t.type === "reminder" ? "reminder" : "task",
-        time: formatTime(iso, tz),
-        sort: new Date(iso).getTime(),
-      });
+      const kind = t.type === "reminder" ? ("reminder" as const) : ("task" as const);
+      const timeIso = t.reminderAt ?? t.dueAt;
+      const time = timeIso ? formatTime(timeIso, tz) : undefined;
+      // Minutes-into-day for stable ordering of same-day items.
+      const minute = timeIso ? new Date(timeIso).getTime() % 86_400_000 : 0;
+      if (t.recurrenceFreq) {
+        // Project the series onto EVERY matching day in the visible grid.
+        for (const c of cells) {
+          if (taskOccursOn(c, t, tz)) add(c.key, { label: t.title, kind, time, sort: minute });
+        }
+      } else {
+        const iso = t.dueAt ?? t.reminderAt;
+        if (iso) add(localYMD(iso, tz), { label: t.title, kind, time, sort: minute });
+      }
     }
     for (const arr of map.values()) arr.sort((a, b) => a.sort - b.sort);
     return map;
-  }, [events, tasks, tz]);
+  }, [events, tasks, cells, tz]);
 
   const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(
     new Date(Date.UTC(ym.y, ym.m, 1)),

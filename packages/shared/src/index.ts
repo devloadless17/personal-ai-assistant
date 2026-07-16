@@ -67,7 +67,16 @@ export interface PortalTask {
   notes: string | null;
   /** Human recurrence summary (e.g. "every Sat") when this repeats, else null. */
   recurrence: string | null;
+  /** Structured recurrence, so the calendar can project every occurrence. */
+  recurrenceFreq: RecurrenceFreq | null;
+  recurrenceInterval: number;
+  recurrenceWeekdays: number[];
+  recurrenceUntil: string | null;
+  /** The series' first occurrence (immutable anchor). */
+  recurrenceAnchor: string | null;
 }
+
+export type RecurrenceFreq = "DAILY" | "WEEKLY" | "MONTHLY";
 
 /** A calendar event shown in the client portal. */
 export interface PortalEvent {

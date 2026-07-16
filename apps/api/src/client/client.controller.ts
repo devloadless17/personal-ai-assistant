@@ -147,6 +147,11 @@ export class ClientController {
       reminderAt: t.reminderAt?.toISOString() ?? null,
       notes: t.notes,
       recurrence: t.recurrenceFreq ? describeRecurrence(t) : null,
+      recurrenceFreq: t.recurrenceFreq,
+      recurrenceInterval: t.recurrenceInterval ?? 1,
+      recurrenceWeekdays: t.recurrenceWeekdays,
+      recurrenceUntil: t.recurrenceUntil?.toISOString() ?? null,
+      recurrenceAnchor: t.recurrenceAnchor?.toISOString() ?? null,
     }));
   }
 
