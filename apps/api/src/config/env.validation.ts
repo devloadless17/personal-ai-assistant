@@ -45,7 +45,13 @@ const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 
 export function validateEnv(config: Record<string, unknown>): Env {
-  const result = envSchema.safeParse(config);
+  // Empty strings in .env files mean "not set" (e.g. `GOOGLE_CLIENT_ID=`) —
+  // normalize them to undefined so optional keys stay optional and required
+  // keys still fail with a clear "Required"/min-length message.
+  const normalized = Object.fromEntries(
+    Object.entries(config).map(([k, v]) => [k, v === '' ? undefined : v]),
+  );
+  const result = envSchema.safeParse(normalized);
   if (!result.success) {
     const issues = result.error.issues
       .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
