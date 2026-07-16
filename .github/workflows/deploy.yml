@@ -260,8 +260,13 @@ jobs:
           # volumes are recreated. The api's CMD runs `prisma migrate deploy` on
           # boot before starting node — migrations apply here, and a failed
           # migration stops the boot → the health gate below fails the deploy.
+          # `up -d` itself fails fast if a depends_on health condition breaks
+          # (web waits on api). Don't let that abort the script here — the
+          # health gate below is the authoritative check and, unlike `up`,
+          # dumps the crashing container's logs into the CI output.
           echo "==> Starting stack"
-          $COMPOSE up -d --remove-orphans
+          $COMPOSE up -d --remove-orphans \
+            || echo "::warning::compose up reported a failed dependency — continuing to the health gate for logs"
 
           # Caddy isn't recreated by `up -d` (its service definition is unchanged),
           # so a freshly-shipped Caddyfile won't load on its own. Reload it now —
