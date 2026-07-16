@@ -5,6 +5,7 @@ import { validateEnv } from './config/env.validation';
 import { CryptoModule } from './crypto/crypto.module';
 import { DevModule } from './dev/dev.module';
 import { HealthModule } from './health/health.module';
+import { TelegramModule } from './integrations/telegram/telegram.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { TenancyModule } from './tenancy/tenancy.module';
 
@@ -20,6 +21,7 @@ import { TenancyModule } from './tenancy/tenancy.module';
     CryptoModule,
     TenancyModule,
     AgentModule,
+    TelegramModule,
     HealthModule,
     // Dev-only chat harness — never registered outside development.
     ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),
