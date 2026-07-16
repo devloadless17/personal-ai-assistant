@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
+import { ClientModule } from './client/client.module';
 import { validateEnv } from './config/env.validation';
 import { CryptoModule } from './crypto/crypto.module';
 import { DevModule } from './dev/dev.module';
@@ -33,6 +34,7 @@ import { TenancyModule } from './tenancy/tenancy.module';
     GoogleModule,
     JobsModule,
     AdminModule,
+    ClientModule,
     HealthModule,
     // Dev-only chat harness — never registered outside development.
     ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),

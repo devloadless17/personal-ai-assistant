@@ -41,6 +41,11 @@ model Client {
   status    ClientStatus @default(active)
   timezone  String // IANA, e.g. "Asia/Riyadh"
 
+  /// The client's Gmail — set by the admin. Enables the client to log into
+  /// their self-service portal via "Sign in with Google". Unique so one
+  /// Google account maps to exactly one client.
+  email String? @unique
+
   /// Assistant persona name filled into {{ASSISTANT_NAME}}
   assistantName String @default("Assistant")
 

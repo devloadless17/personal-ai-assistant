@@ -18,8 +18,9 @@ import { Label } from "@/components/ui/label";
 export function NewClientDialog({ onCreated }: { onCreated: () => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [timezone, setTimezone] = useState("Asia/Riyadh");
+  const [timezone, setTimezone] = useState("Asia/Beirut");
   const [assistantName, setAssistantName] = useState("Assistant");
+  const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -30,7 +31,7 @@ export function NewClientDialog({ onCreated }: { onCreated: () => void | Promise
     try {
       await api("/admin/clients", {
         method: "POST",
-        body: { name, timezone, assistantName },
+        body: { name, timezone, assistantName, email: email.trim() || undefined },
       });
       setOpen(false);
       setName("");
@@ -82,6 +83,16 @@ export function NewClientDialog({ onCreated }: { onCreated: () => void | Promise
               value={assistantName}
               onChange={(e) => setAssistantName(e.target.value)}
               placeholder="e.g. Aya"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="nc-email">Client&apos;s Gmail (for portal login)</Label>
+            <Input
+              id="nc-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="e.g. client@gmail.com — optional"
             />
           </div>
           {error && (

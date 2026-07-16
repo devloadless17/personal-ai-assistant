@@ -17,6 +17,7 @@ const CLIENT: Client = {
   status: 'active',
   timezone: 'UTC',
   assistantName: 'Aya',
+  email: null,
   telegramBotTokenEnc: 'enc-token',
   telegramChatId: '777',
   telegramWebhookSecretEnc: 'enc-secret',

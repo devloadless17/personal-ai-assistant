@@ -1,18 +1,14 @@
-import { randomBytes } from 'node:crypto';
 import {
   BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import type { Client, Prisma } from '@prisma/client';
 import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
-import { CryptoService } from '../crypto/crypto.service';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
-import { TelegramService } from '../integrations/telegram/telegram.service';
+import { TelegramConnectionService } from '../integrations/telegram/telegram-connection.service';
 import { PrismaService } from '../prisma/prisma.service';
-import type { Env } from '../config/env.validation';
 
 function summarize(c: Client): ClientSummary {
   return {
@@ -21,6 +17,7 @@ function summarize(c: Client): ClientSummary {
     status: c.status,
     timezone: c.timezone,
     assistantName: c.assistantName,
+    email: c.email,
     telegramConnected: Boolean(c.telegramBotTokenEnc),
     googleConnected: Boolean(c.googleOAuthEnc),
     googleNeedsReauth: c.googleNeedsReauth,
@@ -35,10 +32,8 @@ export class AdminClientsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly crypto: CryptoService,
-    private readonly telegram: TelegramService,
+    private readonly telegramConnection: TelegramConnectionService,
     private readonly google: GoogleOAuthService,
-    private readonly config: ConfigService<Env, true>,
   ) {}
 
   async list(): Promise<ClientSummary[]> {
@@ -56,6 +51,7 @@ export class AdminClientsService {
     name: string;
     timezone: string;
     assistantName: string;
+    email?: string;
     dailyBriefHour?: number;
   }): Promise<ClientSummary> {
     this.assertValidTimezone(data.timezone);
@@ -70,6 +66,7 @@ export class AdminClientsService {
       name: string;
       timezone: string;
       assistantName: string;
+      email: string;
       status: 'active' | 'disabled';
       dailyBriefHour: number;
     }>,
@@ -83,41 +80,9 @@ export class AdminClientsService {
     }
   }
 
-  /**
-   * Connects a client's Telegram bot: validates the token against the real
-   * Bot API, stores it encrypted, generates a webhook secret, and registers
-   * the webhook. Fails loudly on any step — no half-connected states.
-   */
+  /** Connect a client's Telegram bot (shared with the client portal). */
   async connectTelegram(id: string, botToken: string): Promise<{ botUsername: string }> {
-    const client = await this.prisma.client.findUnique({ where: { id } });
-    if (!client) throw new NotFoundException('Client not found');
-
-    let botUsername: string;
-    try {
-      botUsername = (await this.telegram.getMe(botToken)).username;
-    } catch {
-      throw new BadRequestException('Telegram rejected that bot token — check it with @BotFather.');
-    }
-
-    const publicApiUrl = this.config.get('PUBLIC_API_URL', { infer: true });
-    if (publicApiUrl.includes('localhost')) {
-      throw new BadRequestException(
-        'PUBLIC_API_URL is a localhost URL — Telegram webhooks need the public HTTPS domain (deploy first, or use a tunnel).',
-      );
-    }
-    const secret = randomBytes(32).toString('hex');
-    await this.telegram.setWebhook(botToken, `${publicApiUrl}/telegram/${id}`, secret);
-
-    await this.prisma.client.update({
-      where: { id },
-      data: {
-        telegramBotTokenEnc: this.crypto.encrypt(botToken),
-        telegramWebhookSecretEnc: this.crypto.encrypt(secret),
-        telegramChatId: null, // rebind on the next first message
-      },
-    });
-    this.logger.log(`Telegram connected for client ${id} (@${botUsername})`);
-    return { botUsername };
+    return this.telegramConnection.connect(id, botToken);
   }
 
   /** Admin fetches this URL and sends it to the client (e.g. via their bot). */

@@ -51,6 +51,9 @@ export default function ClientsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => router.push("/test-chat")}>
+            Test chat
+          </Button>
           <NewClientDialog onCreated={load} />
           <Button
             variant="ghost"

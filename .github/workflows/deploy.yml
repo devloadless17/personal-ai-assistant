@@ -1,0 +1,319 @@
+# Push to `main` = deploy. There is NO production/staging branch — main IS the
+# release branch. CI runs on every event; build + deploy run only on a real push
+# (or manual dispatch) to main, never on a pull request.
+#
+#   PR → main            → typecheck + lint + test only (never touches the server)
+#   Push to main         → checks → build & push both images → ship to VPS →
+#                          migrate (on api boot) → health-gate api + web
+#   Manual run           → same as a push to main (deploys)
+#
+# The build + deploy jobs are gated on `github.ref == refs/heads/main` AND
+# `event_name != pull_request`, so a PR can never reach the server.
+#
+# SSH auth: the deploy key is stored base64-encoded (single line) in the
+# VPS_SSH_KEY_B64 secret — a single line can't get its newlines mangled on
+# paste. We decode it to a file and use plain ssh/scp.
+#
+# Images are built + pushed to Docker Hub and pulled on the VPS, pinned to this
+# commit's SHA (immutable → reliable recreate + SHA-based rollback). The api
+# image applies Prisma migrations on boot (its CMD), so no separate migrate step.
+name: CI & Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------
+  # Runs on EVERY event (PR + push). PRs stop here.
+  # ---------------------------------------------------------------
+  checks:
+    name: Typecheck, Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Generate the Prisma client (api typecheck imports it). `exec prisma`
+      # bypasses the db:generate script's dotenv wrapper, which would fail on the
+      # missing .env in CI — generate needs no DATABASE_URL.
+      - run: pnpm --filter @assistant/api exec prisma generate
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+
+  # ---------------------------------------------------------------
+  # Build + push the api and web images IN PARALLEL (one matrix leg each). Runs
+  # ONLY on a push/dispatch to main (never on a PR); needs checks green.
+  # ---------------------------------------------------------------
+  build:
+    name: Build & push (${{ matrix.app }})
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - app: api
+            dockerfile: docker/api.Dockerfile
+          - app: web
+            dockerfile: docker/web.Dockerfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_SECRET }}
+
+      # Tags: latest + commit SHA (the SHA tag is what the deploy pins to, for
+      # rollbacks). The web image needs no build args — it reads API_URL at
+      # request time (server components), so the same image is domain-agnostic.
+      - name: Build & push ${{ matrix.app }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/personal-ai-assistant-${{ matrix.app }}:latest
+            ${{ secrets.DOCKER_USERNAME }}/personal-ai-assistant-${{ matrix.app }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
+  # ---------------------------------------------------------------
+  # Render .env from secrets, ship config, pull the pinned images, recreate the
+  # stack, health-gate. Needs BOTH images pushed first. The main-branch guard is
+  # repeated here deliberately (defence in depth).
+  # ---------------------------------------------------------------
+  deploy:
+    name: Ship & Deploy
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # Fail fast with a clear message if a required secret is missing.
+      # (Google + admin-alert secrets are OPTIONAL — they render empty and the
+      # matching feature stays off, matching the env schema's optionality.)
+      - name: Validate required secrets
+        env:
+          REQUIRED: |
+            DOCKER_USERNAME DOCKER_SECRET VPS_HOST VPS_USER VPS_SSH_KEY_B64 DOMAIN
+            DATABASE_URL ENCRYPTION_KEY JWT_SECRET ANTHROPIC_API_KEY
+            ADMIN_EMAIL ADMIN_PASSWORD
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          missing=""
+          for key in $REQUIRED; do
+            val=$(printf '%s' "$SECRETS_JSON" | jq -r --arg k "$key" '.[$k] // ""')
+            [ -z "$val" ] && missing="$missing $key"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required GitHub secret(s):$missing"
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Decode the SSH key (base64 single-line secret → no newline mangling).
+      - name: Prepare SSH key
+        env:
+          KEY_B64: ${{ secrets.VPS_SSH_KEY_B64 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s' "$KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          head -1 ~/.ssh/deploy_key | grep -q "PRIVATE KEY" \
+            || { echo "::error::VPS_SSH_KEY_B64 did not decode to a valid private key"; exit 1; }
+          echo "✓ SSH key decoded"
+
+      # Some VPS hosts run edge DDoS scrubbing that intermittently drops the
+      # shared GitHub-runner IP's SYNs (→ connection timeout). The window is
+      # short, so poll until the runner IP clears instead of failing outright.
+      - name: Wait for VPS SSH to be reachable
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          PORT: ${{ secrets.VPS_PORT || '22' }}
+        run: |
+          for i in $(seq 1 7); do
+            if timeout 8 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+              echo "✓ $HOST:$PORT reachable (attempt $i/7)"
+              exit 0
+            fi
+            echo "… $HOST:$PORT unreachable (attempt $i/7) — retrying in 8s"
+            sleep 8
+          done
+          echo "::error::$HOST:$PORT never became reachable (~2 min). Re-run for a fresh runner IP."
+          exit 1
+
+      # Render .env from secrets ON THE RUNNER, from the committed template.
+      - name: Render .env
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ADMIN_ALERT_BOT_TOKEN: ${{ secrets.ADMIN_ALERT_BOT_TOKEN }}
+          ADMIN_ALERT_CHAT_ID: ${{ secrets.ADMIN_ALERT_CHAT_ID }}
+        run: |
+          cp .env.prod.example .env.rendered
+          # Escape sed replacement metacharacters (\ & and the | delimiter) so a
+          # free-form secret (admin password, DB URL, provider key) containing one
+          # can't corrupt the rendered .env.
+          esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+          # Pin the stack to THIS commit's immutable image tag (built above)
+          # instead of the floating :latest — reliable recreate + SHA rollback.
+          sed -i "s|^IMAGE_TAG=latest|IMAGE_TAG=$GITHUB_SHA|" .env.rendered
+          sed -i "s|__DOCKER_USERNAME__|$(esc "$DOCKER_USERNAME")|g" .env.rendered
+          sed -i "s|__DOMAIN__|$(esc "$DOMAIN")|g" .env.rendered
+          sed -i "s|__DATABASE_URL__|$(esc "$DATABASE_URL")|g" .env.rendered
+          sed -i "s|__ENCRYPTION_KEY__|$(esc "$ENCRYPTION_KEY")|g" .env.rendered
+          sed -i "s|__JWT_SECRET__|$(esc "$JWT_SECRET")|g" .env.rendered
+          sed -i "s|__ANTHROPIC_API_KEY__|$(esc "$ANTHROPIC_API_KEY")|g" .env.rendered
+          sed -i "s|__GOOGLE_CLIENT_ID__|$(esc "$GOOGLE_CLIENT_ID")|g" .env.rendered
+          sed -i "s|__GOOGLE_CLIENT_SECRET__|$(esc "$GOOGLE_CLIENT_SECRET")|g" .env.rendered
+          sed -i "s|__ADMIN_EMAIL__|$(esc "$ADMIN_EMAIL")|g" .env.rendered
+          sed -i "s|__ADMIN_PASSWORD__|$(esc "$ADMIN_PASSWORD")|g" .env.rendered
+          sed -i "s|__ADMIN_ALERT_BOT_TOKEN__|$(esc "$ADMIN_ALERT_BOT_TOKEN")|g" .env.rendered
+          sed -i "s|__ADMIN_ALERT_CHAT_ID__|$(esc "$ADMIN_ALERT_CHAT_ID")|g" .env.rendered
+
+      - name: Ship & deploy
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          SSH_USER: ${{ secrets.VPS_USER }}
+          PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_DIR_OVERRIDE: ${{ secrets.DEPLOY_DIR }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_SECRET: ${{ secrets.DOCKER_SECRET }}
+        run: |
+          set -e
+          KEY=~/.ssh/deploy_key
+          COMMON="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          DEPLOY_DIR="${DEPLOY_DIR_OVERRIDE:-/home/$SSH_USER/personal-ai-assistant}"
+
+          echo "==> Ensuring $DEPLOY_DIR exists"
+          ssh -i "$KEY" -p "$PORT" $COMMON "$SSH_USER@$HOST" "mkdir -p '$DEPLOY_DIR'"
+
+          echo "==> Copying files to $SSH_USER@$HOST:$DEPLOY_DIR"
+          # Ship compose + Caddyfile + rollback.sh + rendered .env FLAT into the
+          # deploy dir (the prod compose references ./Caddyfile and .env as
+          # same-dir siblings).
+          scp -i "$KEY" -P "$PORT" $COMMON \
+            docker/docker-compose.prod.yml docker/Caddyfile docker/rollback.sh .env.rendered \
+            "$SSH_USER@$HOST:$DEPLOY_DIR/"
+
+          echo "==> Activating .env + deploying"
+          # The remote script is piped into `bash -s` over ssh; DOCKER_SECRET is
+          # prepended over STDIN (printf %q) instead of riding the ssh argv, which
+          # is world-readable via `ps` on the VPS for the whole deploy.
+          REMOTE_SCRIPT="$(cat <<'REMOTE'
+          set -e
+          cd "$DEPLOY_DIR"
+          mv -f .env.rendered .env
+          chmod 600 .env
+          chmod +x rollback.sh 2>/dev/null || true
+
+          COMPOSE="docker compose -f docker-compose.prod.yml"
+
+          # Tag of the release currently running (empty on the very first deploy).
+          # If the new release proves healthy this becomes the rollback target.
+          PREV_TAG="$(cat .deploy_current 2>/dev/null || true)"
+          NEW_TAG="$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)"
+
+          echo "$DOCKER_SECRET" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+          echo "==> Pulling images"
+          $COMPOSE pull
+
+          # IMAGE_TAG is pinned to this commit's SHA, so only api/web (whose image
+          # ref changed) get recreated. proxy keeps running untouched; no data
+          # volumes are recreated. The api's CMD runs `prisma migrate deploy` on
+          # boot before starting node — migrations apply here, and a failed
+          # migration stops the boot → the health gate below fails the deploy.
+          echo "==> Starting stack"
+          $COMPOSE up -d --remove-orphans
+
+          # Caddy isn't recreated by `up -d` (its service definition is unchanged),
+          # so a freshly-shipped Caddyfile won't load on its own. Reload it now —
+          # graceful + atomic: an invalid Caddyfile is rejected and the running
+          # config kept, so this can never break the live proxy. Tolerated on the
+          # first deploy (proxy was just created fresh with the new file).
+          echo "==> Reloading Caddy config"
+          $COMPOSE exec -T proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null \
+            || echo "::warning::caddy reload skipped/failed — proxy kept its config"
+
+          # Health-gate api, then web. A runtime-broken container fails the deploy
+          # instead of silently going green on the old-but-replaced image.
+          for svc in "assistant_api:API" "assistant_web:Web"; do
+            NAME="${svc%%:*}"; LABEL="${svc##*:}"
+            echo "==> Waiting for $LABEL health"
+            RETRIES=0; MAX=45
+            until [ "$RETRIES" -ge "$MAX" ]; do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo "starting")
+              [ "$STATUS" = "healthy" ] && { echo "$LABEL is healthy!"; break; }
+              RETRIES=$((RETRIES + 1)); echo "  ...($RETRIES/$MAX) status=$STATUS"; sleep 4
+            done
+            if [ "$RETRIES" -ge "$MAX" ]; then
+              echo "$LABEL did not become healthy in time:"
+              $COMPOSE logs --tail 80 "${LABEL,,}" || true
+              echo "::error::New release is unhealthy ($LABEL). Run ./rollback.sh on the server to revert."
+              exit 1
+            fi
+          done
+
+          # Healthy: record the rollback pointer, then prune images we no longer
+          # need — keep the new release + the previous one (for rollback) + latest.
+          echo "==> Healthy — recording rollback pointer + pruning stale images"
+          echo "$NEW_TAG" > .deploy_current
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$NEW_TAG" ]; then
+            echo "$PREV_TAG" > .deploy_previous
+          fi
+          KEEP=" $NEW_TAG $PREV_TAG latest "
+          for repo in "$DOCKER_USERNAME/personal-ai-assistant-api" "$DOCKER_USERNAME/personal-ai-assistant-web"; do
+            docker images "$repo" --format '{{.Tag}}' | sort -u | while read -r t; do
+              case "$KEEP" in
+                *" $t "*) : ;;
+                *) docker rmi "$repo:$t" >/dev/null 2>&1 || true ;;
+              esac
+            done
+          done
+          docker image prune -f >/dev/null 2>&1 || true
+
+          $COMPOSE ps
+          REMOTE
+          )"
+          { printf 'DOCKER_SECRET=%q\n' "$DOCKER_SECRET"; printf '%s\n' "$REMOTE_SCRIPT"; } | \
+            ssh -i "$KEY" -p "$PORT" $COMMON \
+              "$SSH_USER@$HOST" \
+              "DEPLOY_DIR='$DEPLOY_DIR' DOCKER_USERNAME='$DOCKER_USERNAME' bash -s"

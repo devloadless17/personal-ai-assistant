@@ -1,0 +1,89 @@
+# Production stack for the VPS — REGISTRY images (no build on the server).
+#
+# CI builds + pushes the api/web images to Docker Hub and this file pulls them,
+# pinned to an immutable per-commit tag (IMAGE_TAG in .env). Postgres is NOT in
+# this stack — it is your existing VPS Postgres, reached over DATABASE_URL
+# (host.docker.internal maps to the VPS host, see extra_hosts below).
+#
+# The deploy job ships this file, Caddyfile, and the rendered .env FLAT into the
+# deploy dir, then runs (from that dir):
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d --remove-orphans
+#
+# DOCKER_USERNAME + IMAGE_TAG are interpolated from the sibling .env, which
+# docker compose auto-loads from the compose file's directory.
+
+name: personal-ai-assistant
+
+services:
+  api:
+    image: ${DOCKER_USERNAME}/personal-ai-assistant-api:${IMAGE_TAG:-latest}
+    container_name: assistant_api
+    restart: always
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      # Internal port is fixed — Caddy and the healthcheck depend on it.
+      # (Overrides any API_PORT from .env so they can never drift apart.)
+      API_PORT: "3001"
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "3001"
+    # The image's CMD runs `prisma migrate deploy` before booting node, so
+    # schema changes apply automatically on every deploy; a failed migration
+    # stops the boot and the health gate below fails the deploy.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  web:
+    image: ${DOCKER_USERNAME}/personal-ai-assistant-web:${IMAGE_TAG:-latest}
+    container_name: assistant_web
+    restart: always
+    environment:
+      NODE_ENV: production
+      # Server components call the API over the internal Docker network
+      API_URL: http://api:3001
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: assistant_proxy
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

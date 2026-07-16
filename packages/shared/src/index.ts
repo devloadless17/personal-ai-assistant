@@ -26,10 +26,43 @@ export interface ClientSummary {
   status: ClientStatus;
   timezone: string;
   assistantName: string;
+  email: string | null;
   telegramConnected: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
   createdAt: string;
+}
+
+/** What a logged-in client sees about their own account (portal). */
+export interface ClientMe {
+  id: string;
+  name: string;
+  assistantName: string;
+  timezone: string;
+  telegramConnected: boolean;
+  googleConnected: boolean;
+  googleNeedsReauth: boolean;
+}
+
+/** A task row shown in the client portal. */
+export interface PortalTask {
+  id: string;
+  title: string;
+  type: TaskType;
+  status: TaskStatus;
+  dueAt: string | null;
+  reminderAt: string | null;
+  notes: string | null;
+}
+
+/** A calendar event shown in the client portal. */
+export interface PortalEvent {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string | null;
 }
 
 /** One audit-log row as shown on the dashboard. */

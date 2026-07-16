@@ -38,6 +38,8 @@ export class GoogleOAuthService {
   private readonly redirectUri?: string;
   /** state → { clientId, expires } (one-time, 15 min TTL). */
   private readonly pendingStates = new Map<string, { clientId: string; expires: number }>();
+  /** state → expires, for the client-portal login flow (no clientId yet). */
+  private readonly pendingLoginStates = new Map<string, number>();
 
   constructor(
     config: ConfigService<Env, true>,
@@ -159,10 +161,94 @@ export class GoogleOAuthService {
     return oauth;
   }
 
+  // ── Client-portal login flow ───────────────────────────────────────────────
+  // One Google sign-in does double duty: it proves the client's identity
+  // (verified id_token → email) AND captures calendar access. Uses a distinct
+  // redirect URI so it never collides with the admin-initiated calendar flow.
+
+  /** Redirect URI for the portal login callback, derived from the calendar one. */
+  clientLoginRedirectUri(): string {
+    if (!this.redirectUri) throw new Error('Google OAuth is not configured.');
+    return this.redirectUri.replace(
+      '/google/oauth/callback',
+      '/client/auth/google/callback',
+    );
+  }
+
+  private newLoginOAuthClient(): OAuth2Client {
+    if (!this.isConfigured) throw new Error('Google OAuth is not configured.');
+    return new google.auth.OAuth2(this.clientId, this.clientSecret, this.clientLoginRedirectUri());
+  }
+
+  /** The "Sign in with Google" URL for the client portal. */
+  buildClientLoginUrl(): string {
+    const oauth = this.newLoginOAuthClient();
+    const state = randomBytes(24).toString('hex');
+    this.pendingLoginStates.set(state, Date.now() + 15 * 60_000);
+    this.gcStates();
+    return oauth.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: ['openid', 'email', ...SCOPES],
+      state,
+    });
+  }
+
+  /**
+   * Portal login callback: verifies state + the Google id_token, and returns
+   * the verified email plus any calendar token bundle (present on first
+   * consent). Storing the bundle happens in ClientAuthService once the email
+   * is matched to a client.
+   */
+  async verifyClientLogin(
+    code: string,
+    state: string,
+  ): Promise<{ email: string; bundle: GoogleTokenBundle | null }> {
+    const expires = this.pendingLoginStates.get(state);
+    this.pendingLoginStates.delete(state); // one-time use
+    if (!expires || expires < Date.now()) {
+      throw new Error('Invalid or expired login state — start again from the portal login page.');
+    }
+
+    const oauth = this.newLoginOAuthClient();
+    const { tokens } = await oauth.getToken(code);
+    if (!tokens.id_token) throw new Error('Google did not return an identity token.');
+
+    const ticket = await oauth.verifyIdToken({ idToken: tokens.id_token, audience: this.clientId });
+    const payload = ticket.getPayload();
+    if (!payload?.email || payload.email_verified !== true) {
+      throw new Error('Google account has no verified email.');
+    }
+
+    const bundle: GoogleTokenBundle | null = tokens.refresh_token
+      ? {
+          refresh_token: tokens.refresh_token,
+          access_token: tokens.access_token ?? undefined,
+          expiry_date: tokens.expiry_date ?? undefined,
+        }
+      : null;
+    return { email: payload.email.toLowerCase(), bundle };
+  }
+
+  /** Persist a calendar token bundle for a known client (portal login). */
+  async persistTokensForClient(clientId: string, bundle: GoogleTokenBundle): Promise<void> {
+    await this.prisma.client.update({
+      where: { id: clientId },
+      data: {
+        googleOAuthEnc: this.crypto.encrypt(JSON.stringify(bundle)),
+        googleNeedsReauth: false,
+      },
+    });
+    this.logger.log(`Google Calendar connected for client ${clientId} (via portal login)`);
+  }
+
   private gcStates(): void {
     const now = Date.now();
     for (const [state, entry] of this.pendingStates) {
       if (entry.expires < now) this.pendingStates.delete(state);
+    }
+    for (const [state, exp] of this.pendingLoginStates) {
+      if (exp < now) this.pendingLoginStates.delete(state);
     }
   }
 }
