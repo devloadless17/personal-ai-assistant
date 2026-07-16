@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { DailyBriefJob } from './daily-brief.job';
 import { ReminderJob } from './reminder.job';
 
 export interface JobsDiagnostics {
@@ -12,6 +13,21 @@ export interface JobsDiagnostics {
     lastDueCount: number;
     lastSentCount: number;
     lastError: string | null;
+  };
+  dailyBrief: {
+    running: boolean; // ticked within the last ~11 minutes (runs every 10)?
+    lastTickAt: string | null;
+    secondsSinceLastTick: number | null;
+    totalTicks: number;
+    lastSentCount: number;
+    lastError: string | null;
+    clients: {
+      name: string;
+      timezone: string;
+      dailyBriefHour: number;
+      lastBriefDate: string | null;
+      chatBound: boolean;
+    }[];
   };
   backlog: {
     overdueUnsent: number; // reminders past due but not yet delivered — should be ~0
@@ -36,6 +52,7 @@ export class JobsDiagnosticsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly reminder: ReminderJob,
+    private readonly brief: DailyBriefJob,
   ) {}
 
   async get(): Promise<JobsDiagnostics> {
@@ -44,6 +61,19 @@ export class JobsDiagnosticsService {
     const secondsSinceLastTick = lastTick
       ? Math.round((now.getTime() - lastTick.getTime()) / 1000)
       : null;
+
+    const briefTick = this.brief.lastTickAt;
+    const briefSince = briefTick ? Math.round((now.getTime() - briefTick.getTime()) / 1000) : null;
+    const briefClients = await this.prisma.client.findMany({
+      where: { status: 'active' },
+      select: {
+        name: true,
+        timezone: true,
+        dailyBriefHour: true,
+        lastBriefDate: true,
+        telegramChatId: true,
+      },
+    });
 
     const overdueUnsent = await this.prisma.task.count({
       where: {
@@ -71,6 +101,21 @@ export class JobsDiagnosticsService {
         lastDueCount: this.reminder.lastDueCount,
         lastSentCount: this.reminder.lastSentCount,
         lastError: this.reminder.lastError,
+      },
+      dailyBrief: {
+        running: briefSince !== null && briefSince < 11 * 60,
+        lastTickAt: briefTick?.toISOString() ?? null,
+        secondsSinceLastTick: briefSince,
+        totalTicks: this.brief.ticks,
+        lastSentCount: this.brief.lastSentCount,
+        lastError: this.brief.lastError,
+        clients: briefClients.map((c) => ({
+          name: c.name,
+          timezone: c.timezone,
+          dailyBriefHour: c.dailyBriefHour,
+          lastBriefDate: c.lastBriefDate,
+          chatBound: c.telegramChatId !== null,
+        })),
       },
       backlog: {
         overdueUnsent,

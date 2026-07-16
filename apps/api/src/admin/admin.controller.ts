@@ -22,7 +22,9 @@ const loginSchema = z.object({ email: z.string().email(), password: z.string().m
 
 const createClientSchema = z.object({
   name: z.string().min(1).max(200),
-  timezone: z.string().min(1),
+  // 99% of clients are in Lebanon — default so the zone is never accidentally
+  // left wrong; the admin can still override per client.
+  timezone: z.string().min(1).default('Asia/Beirut'),
   assistantName: z.string().min(1).max(100).default('Assistant'),
   email: z.string().email().toLowerCase().optional(),
   defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),

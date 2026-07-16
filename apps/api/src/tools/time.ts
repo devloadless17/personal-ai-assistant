@@ -14,6 +14,35 @@ export const isoDateTime = z
   .refine((s) => !Number.isNaN(Date.parse(s)), { message: 'must be an ISO 8601 datetime' })
   .transform((s) => new Date(s));
 
+/** ISO date/datetime that carries NO timezone marker (no trailing Z / ±HH:MM). */
+const OFFSETLESS_ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(\.\d+)?)?$/;
+
+/** True when `s` is an ISO date/datetime with no explicit timezone offset. */
+export function isOffsetlessIso(s: string): boolean {
+  return OFFSETLESS_ISO.test(s.trim());
+}
+
+/**
+ * Make a model-supplied time unambiguous by anchoring it to the CLIENT's
+ * timezone. If the string already carries an offset (or isn't an ISO datetime)
+ * it is returned unchanged. Otherwise the client tz's offset AT THAT wall-clock
+ * time is appended (DST-safe, two-pass) so `new Date(...)` resolves to the
+ * correct instant regardless of the server's timezone. Date-only strings are
+ * treated as local midnight.
+ *
+ * This is the single guarantee that "9:30" from a Beirut client means 9:30 in
+ * Beirut, never 9:30 on the UTC server — independent of whether the model
+ * remembered to include the offset.
+ */
+export function withClientOffset(raw: string, timeZone: string): string {
+  const s = raw.trim();
+  if (!isOffsetlessIso(s)) return raw;
+  const base = s.length === 10 ? `${s}T00:00:00` : s;
+  const first = isoInTz(new Date(`${base}Z`), timeZone).slice(-6);
+  const second = isoInTz(new Date(`${base}${first}`), timeZone).slice(-6);
+  return `${base}${second}`;
+}
+
 /** Format a Date in the client's timezone, e.g. "Fri, Jul 18 2026, 3:00 PM". */
 export function formatInTz(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {

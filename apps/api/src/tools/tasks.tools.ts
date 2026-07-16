@@ -94,11 +94,24 @@ export const createTask = defineTool({
   async execute(input, ctx) {
     const rem = resolveReminderAt(input.reminder_at, input.reminder_minutes_before, input.due_at);
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was created.`;
+    const type = input.type ?? 'task';
+    let reminderAt = rem.changed ? rem.value : null;
+    // App-owned guarantee: a REMINDER must actually fire. The model sometimes
+    // sets a due time but forgets the reminder fields — leaving reminderAt null,
+    // which the cron can never match (silent no-op). So for a reminder with a
+    // due time and NO reminder specified, default the ping to the due time
+    // itself (the client asked to be reminded AT that time). Never trust the
+    // model to remember this. `!rem.changed` means the model gave no reminder
+    // field at all — an explicit `reminder_minutes_before: 0` (rem.changed with
+    // value null) is a deliberate "no reminder" and is respected.
+    if (type === 'reminder' && !rem.changed && input.due_at) {
+      reminderAt = input.due_at;
+    }
     const task = await ctx.repo.createTask({
       title: input.title,
       type: input.type,
       dueAt: input.due_at ?? null,
-      reminderAt: rem.changed ? rem.value : null,
+      reminderAt,
       notes: input.notes ?? null,
     });
     return `Created: ${renderTask(task, ctx.client.timezone)}`;
@@ -153,6 +166,21 @@ export const updateTask = defineTool({
     ) {
       const lead = existing.dueAt.getTime() - existing.reminderAt.getTime();
       rem = { changed: true, value: new Date(due_at.getTime() - lead) };
+    }
+
+    // App-owned guarantee (mirror of create_task): a reminder must keep a live
+    // ping. If the effective type is 'reminder' with a due time but the model
+    // touched no reminder field (!rem.changed) and none exists, default the
+    // ping to the due time. An explicit clear (rem.changed, value null) stands.
+    const effectiveType = rest.type ?? existing?.type;
+    const effectiveDue = due_at !== undefined ? due_at : (existing?.dueAt ?? null);
+    if (
+      effectiveType === 'reminder' &&
+      !rem.changed &&
+      (existing?.reminderAt ?? null) === null &&
+      effectiveDue
+    ) {
+      rem = { changed: true, value: effectiveDue };
     }
 
     const task = await ctx.repo.updateTask(task_id, {

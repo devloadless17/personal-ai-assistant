@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import type { Client } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
@@ -23,8 +23,14 @@ import { AdminAlertService } from './admin-alert.service';
  * digest must be exactly right, every time.
  */
 @Injectable()
-export class DailyBriefJob {
+export class DailyBriefJob implements OnApplicationBootstrap {
   private readonly logger = new Logger(DailyBriefJob.name);
+
+  // Heartbeat/observability — surfaced by GET /admin/diagnostics.
+  lastTickAt: Date | null = null;
+  lastSentCount = 0;
+  lastError: string | null = null;
+  ticks = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -35,11 +41,22 @@ export class DailyBriefJob {
     private readonly alerts: AdminAlertService,
   ) {}
 
+  /** After any restart/redeploy, check briefs immediately — so a deploy landing
+   * right at a client's brief hour doesn't skip that day's brief entirely. The
+   * once-per-day claim keeps this from double-sending. */
+  async onApplicationBootstrap(): Promise<void> {
+    await this.tick();
+  }
+
   @Cron('*/10 * * * *')
   async tick(): Promise<void> {
+    this.lastTickAt = new Date();
+    this.ticks += 1;
     try {
-      await this.run(new Date());
+      await this.run(this.lastTickAt);
+      this.lastError = null;
     } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
       this.logger.error(
         `Daily-brief tick failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
@@ -51,6 +68,7 @@ export class DailyBriefJob {
     const clients = await this.prisma.client.findMany({
       where: { status: 'active', telegramChatId: { not: null } },
     });
+    this.lastSentCount = 0;
 
     for (const client of clients) {
       const localDate = this.localDate(now, client.timezone);
@@ -74,6 +92,7 @@ export class DailyBriefJob {
           throw new Error('client has no bot token or bound chat');
         }
         await this.telegram.sendMessage(botToken, client.telegramChatId, text);
+        this.lastSentCount += 1;
         this.logger.log(`Daily brief sent to client ${client.id} (${localDate})`);
       } catch (err) {
         // Revert the claim so a later tick today retries.

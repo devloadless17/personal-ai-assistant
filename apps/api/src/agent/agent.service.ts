@@ -7,6 +7,7 @@ import { TenancyService } from '../tenancy/tenancy.service';
 import { ALL_TOOLS } from '../tools';
 import { toClaudeTool } from '../tools/tool.types';
 import type { CalendarGateway, ToolContext, ToolDefinition } from '../tools/tool.types';
+import { isOffsetlessIso, withClientOffset } from '../tools/time';
 import { buildVolatilePrompt, STABLE_TEMPLATE } from './system-prompt';
 
 /** Hard ceiling on tool-use round trips per client message. */
@@ -60,6 +61,27 @@ const COMPLETION_CLAIM = new RegExp(
  */
 const FAILURE_ACK =
   /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to)|not able|didn'?t go through)\b/i;
+
+/**
+ * Recursively rewrite offset-less ISO datetime strings in a tool-input value so
+ * they carry the client timezone's offset. Non-strings, already-offset strings,
+ * and non-datetime strings (titles, notes, ids) pass through untouched — the
+ * ISO shape check is strict enough that free text is never matched.
+ */
+function anchorDateTimes(value: unknown, timeZone: string): unknown {
+  if (typeof value === 'string') {
+    return isOffsetlessIso(value) ? withClientOffset(value, timeZone) : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => anchorDateTimes(v, timeZone));
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = anchorDateTimes(v, timeZone);
+    return out;
+  }
+  return value;
+}
 
 export interface CalendarGatewayFactory {
   /** Returns a gateway bound to this client's Google credentials, or null if not connected. */
@@ -240,7 +262,12 @@ export class AgentService {
       resultText = `ERROR: unknown tool "${use.name}".`;
       success = false;
     } else {
-      const parsed = tool.schema.safeParse(use.input);
+      // TIMEZONE GUARANTEE: anchor every offset-less datetime the model sent to
+      // THIS client's timezone before the tool sees it, so "9:30" from a Beirut
+      // client is 9:30 in Beirut — never 9:30 on the UTC server. One choke
+      // point covers every current and future time field.
+      const input = anchorDateTimes(use.input, ctx.client.timezone);
+      const parsed = tool.schema.safeParse(input);
       if (!parsed.success) {
         resultText = `ERROR: invalid input for ${use.name}: ${parsed.error.issues
           .map((i) => `${i.path.join('.')}: ${i.message}`)
