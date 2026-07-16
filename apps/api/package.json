@@ -16,6 +16,7 @@
     "db:studio": "dotenv -e ../../.env -- prisma studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
     "@assistant/shared": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/config": "^4.0.2",
@@ -25,7 +26,8 @@
     "prisma": "^6.16.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.10",

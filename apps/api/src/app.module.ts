@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AgentModule } from './agent/agent.module';
 import { validateEnv } from './config/env.validation';
+import { CryptoModule } from './crypto/crypto.module';
+import { DevModule } from './dev/dev.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { TenancyModule } from './tenancy/tenancy.module';
 
 @Module({
   imports: [
@@ -13,7 +17,12 @@ import { PrismaModule } from './prisma/prisma.module';
       envFilePath: ['../../.env', '.env'],
     }),
     PrismaModule,
+    CryptoModule,
+    TenancyModule,
+    AgentModule,
     HealthModule,
+    // Dev-only chat harness — never registered outside development.
+    ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),
   ],
 })
 export class AppModule {}
