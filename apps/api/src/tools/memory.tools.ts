@@ -1,22 +1,40 @@
 import { z } from 'zod';
 import { defineTool } from './tool.types';
 
+const CATEGORY_LABEL: Record<string, string> = {
+  PROFILE: 'Profile',
+  PREFERENCE: 'Preferences',
+  LONGTERM: 'Long-term',
+};
+
 export const getProfile = defineTool({
   name: 'get_profile',
   description:
-    'Read everything remembered about this client (preferences, facts, standing instructions). Call when a stored preference might change how you should act.',
+    'Read everything remembered about this client (profile, preferences, standing facts), grouped by category. Call when a stored preference might change how you should act.',
   schema: z.object({}),
   async execute(_input, ctx) {
     const memories = await ctx.repo.getMemories();
     if (memories.length === 0) return 'No stored preferences or facts yet.';
-    return memories.map((m) => `${m.key}: ${m.value}`).join('\n');
+    // Group by category so the model sees a clean profile / preferences / facts view.
+    const order = ['PROFILE', 'PREFERENCE', 'LONGTERM'];
+    const groups = new Map<string, string[]>();
+    for (const m of memories) {
+      const cat = (m as { category?: string }).category ?? 'LONGTERM';
+      const arr = groups.get(cat) ?? [];
+      arr.push(`  ${m.key}: ${m.value}`);
+      groups.set(cat, arr);
+    }
+    return order
+      .filter((c) => groups.has(c))
+      .map((c) => `${CATEGORY_LABEL[c] ?? c}:\n${(groups.get(c) ?? []).join('\n')}`)
+      .join('\n');
   },
 });
 
 export const saveMemory = defineTool({
   name: 'save_memory',
   description:
-    'Durably remember a preference or fact about the client (e.g. "assistant_language: Arabic", "prefers_morning_meetings: true"). Overwrites the key if it exists. Use short snake_case keys. For reminder lead time or the daily-summary hour, use set_reminder_preference instead.',
+    'Durably remember a preference or fact about the client (e.g. "assistant_language: Arabic", "prefers_morning_meetings: true"). Overwrites the key if it exists. Use short snake_case keys. Set category: profile (who they are — job, location), preference (how they like things), or longterm (goals/projects/facts). For reminder lead time or the daily-summary hour, use set_reminder_preference instead.',
   schema: z.object({
     key: z
       .string()
@@ -25,10 +43,30 @@ export const saveMemory = defineTool({
       .regex(/^[a-z0-9_]+$/, 'snake_case key')
       .describe('Short snake_case identifier, e.g. "preferred_meeting_time".'),
     value: z.string().min(1).max(2000).describe('The fact/preference to remember.'),
+    category: z
+      .enum(['profile', 'preference', 'longterm'])
+      .optional()
+      .describe('profile = who they are; preference = how they like things; longterm = goals/facts. Default longterm.'),
   }),
   async execute(input, ctx) {
-    await ctx.repo.saveMemory(input.key, input.value);
+    const category = input.category
+      ? (input.category.toUpperCase() as 'PROFILE' | 'PREFERENCE' | 'LONGTERM')
+      : undefined;
+    await ctx.repo.saveMemory(input.key, input.value, category);
     return `Remembered ${input.key}: ${input.value}`;
+  },
+});
+
+export const forgetMemory = defineTool({
+  name: 'forget_memory',
+  description:
+    'Forget a previously stored fact/preference by its key (e.g. the client says "forget that I like morning meetings"). Get keys from get_profile.',
+  schema: z.object({
+    key: z.string().min(1).max(100).describe('The snake_case key to remove.'),
+  }),
+  async execute(input, ctx) {
+    const removed = await ctx.repo.deleteMemory(input.key);
+    return removed ? `Forgotten: ${input.key}.` : `ERROR: no stored memory with key "${input.key}".`;
   },
 });
 

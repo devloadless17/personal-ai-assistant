@@ -1,9 +1,11 @@
 import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import type { Client, Task } from '@prisma/client';
+import { mapWithConcurrency } from '../common/concurrency';
 import { CryptoService } from '../crypto/crypto.service';
 import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { formatInTz } from '../tools/time';
+import { formatInTz, nextOccurrence } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
 
 /**
@@ -44,6 +46,8 @@ export class ReminderJob implements OnApplicationBootstrap {
   /** Lease window: a claimed-but-unconfirmed reminder is re-claimable after
    * this long (covers a crash between claim and send). */
   private static readonly LEASE_MS = 3 * 60_000;
+  /** Reminders delivered in parallel per tick. */
+  private static readonly CONCURRENCY = 6;
   /** Prevents a long tick from overlapping the next — avoids doubled load and
    * heartbeat clobber. */
   private running = false;
@@ -88,58 +92,107 @@ export class ReminderJob implements OnApplicationBootstrap {
     });
     this.lastDueCount = due.length;
     this.lastSentCount = 0;
+    // Bounded concurrency: deliver several due reminders in parallel (each
+    // independently leased) instead of serially, so a batch doesn't drift late.
+    await mapWithConcurrency(due, ReminderJob.CONCURRENCY, (task) => this.deliver(task, now, leaseCutoff));
+  }
 
-    for (const task of due) {
-      // Atomic LEASE (not a final commit): claim only if still unsent and not
-      // freshly claimed by a concurrent tick. reminderSent stays false until
-      // delivery is CONFIRMED, so a crash after this point loses nothing — a
-      // later tick re-claims the expired lease. At-least-once by design.
-      const { count } = await this.prisma.task.updateMany({
-        where: {
-          id: task.id,
-          reminderSent: false,
-          OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
-        },
-        data: { reminderClaimedAt: now },
-      });
-      if (count === 0) continue;
+  private async deliver(
+    task: Task & { client: Client },
+    now: Date,
+    leaseCutoff: Date,
+  ): Promise<void> {
+    // Atomic LEASE (not a final commit): claim only if still unsent and not
+    // freshly claimed by a concurrent tick. reminderSent stays false until
+    // delivery is CONFIRMED, so a crash after this point loses nothing — a
+    // later tick re-claims the expired lease. At-least-once by design.
+    const { count } = await this.prisma.task.updateMany({
+      where: {
+        id: task.id,
+        reminderSent: false,
+        OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
+      },
+      data: { reminderClaimedAt: now },
+    });
+    if (count === 0) return;
 
-      const { client } = task;
-      try {
-        const botToken = client.telegramBotTokenEnc
-          ? this.crypto.decrypt(client.telegramBotTokenEnc)
-          : null;
-        if (!botToken || !client.telegramChatId) {
-          throw new Error('client has no bot token or bound chat');
-        }
-        const when = task.dueAt ? ` (due ${formatInTz(task.dueAt, client.timezone)})` : '';
-        await this.telegram.sendMessage(
-          botToken,
-          client.telegramChatId,
-          `⏰ Reminder: ${task.title}${when}`,
-        );
-        // Delivery CONFIRMED — only now mark it permanently sent.
-        await this.prisma.task.updateMany({
-          where: { id: task.id },
-          data: { reminderSent: true },
-        });
-        this.lastSentCount += 1;
-        this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
-      } catch (err) {
-        // Release the lease immediately so the next tick retries without waiting
-        // out the lease window; alert on the failure.
-        await this.prisma.task.updateMany({
-          where: { id: task.id, reminderSent: false },
-          data: { reminderClaimedAt: null },
-        });
-        this.logger.error(
-          `Reminder send failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        await this.alerts.alert(
-          `reminder-${client.id}`,
-          `Reminder delivery failing for client "${client.name}" — check their bot token/chat.`,
-        );
+    const { client } = task;
+    try {
+      const botToken = client.telegramBotTokenEnc
+        ? this.crypto.decrypt(client.telegramBotTokenEnc)
+        : null;
+      if (!botToken || !client.telegramChatId) {
+        throw new Error('client has no bot token or bound chat');
       }
+      const when = task.dueAt ? ` (due ${formatInTz(task.dueAt, client.timezone)})` : '';
+      await this.telegram.sendMessage(
+        botToken,
+        client.telegramChatId,
+        `⏰ Reminder: ${task.title}${when}`,
+      );
+      // Delivery CONFIRMED — recurring reminders roll forward to their next
+      // occurrence; one-shots are marked permanently sent.
+      await this.advanceOrComplete(task, client.timezone);
+      this.lastSentCount += 1;
+      this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
+    } catch (err) {
+      // Release the lease immediately so the next tick retries without waiting
+      // out the lease window; alert on the failure.
+      await this.prisma.task.updateMany({
+        where: { id: task.id, reminderSent: false },
+        data: { reminderClaimedAt: null },
+      });
+      this.logger.error(
+        `Reminder send failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.alerts.alert(
+        `reminder-${client.id}`,
+        `Reminder delivery failing for client "${client.name}" — check their bot token/chat.`,
+      );
     }
+  }
+
+  /**
+   * After a confirmed send: a recurring reminder re-arms the SAME row to its
+   * next occurrence (reminderSent back to false, lease cleared); a one-shot (or
+   * a series that has passed `recurrenceUntil`) is marked permanently sent.
+   * Any failure to compute the next occurrence falls back to marking sent, so a
+   * row can never get stuck re-sending.
+   */
+  private async advanceOrComplete(task: Task, timezone: string): Promise<void> {
+    try {
+      if (task.recurrenceFreq && task.reminderAt) {
+        const next = nextOccurrence(
+          task.reminderAt,
+          task.recurrenceFreq,
+          task.recurrenceInterval ?? 1,
+          task.recurrenceWeekdays,
+          timezone,
+        );
+        const beyondUntil =
+          task.recurrenceUntil != null && next.getTime() > task.recurrenceUntil.getTime();
+        if (!beyondUntil && next.getTime() > task.reminderAt.getTime()) {
+          const deltaMs = next.getTime() - task.reminderAt.getTime();
+          await this.prisma.task.updateMany({
+            where: { id: task.id },
+            data: {
+              reminderAt: next,
+              ...(task.dueAt ? { dueAt: new Date(task.dueAt.getTime() + deltaMs) } : {}),
+              reminderSent: false,
+              reminderClaimedAt: null,
+            },
+          });
+          return;
+        }
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to compute next occurrence for recurring task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    await this.prisma.task.updateMany({
+      where: { id: task.id },
+      data: { reminderSent: true },
+    });
   }
 }

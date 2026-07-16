@@ -51,7 +51,28 @@ async function conflictWarning(
   if (!ctx.calendar) return null;
   const conflicts = await ctx.calendar.findConflicts(start, end, excludeEventId);
   if (conflicts.length === 0) return null;
-  return renderConflicts(conflicts, ctx.client.timezone);
+  const tz = ctx.client.timezone;
+  let out = renderConflicts(conflicts, tz);
+
+  // SMART SCHEDULING: proactively offer concrete alternatives in the SAME
+  // result — the assistant presents them directly instead of having to
+  // re-derive with find_free_time. Search around the requested time for the
+  // nearest open slots of the same duration.
+  const durationMinutes = Math.max(5, Math.round((end.getTime() - start.getTime()) / 60_000));
+  const searchFrom = start.getTime() > ctx.now.getTime() ? start : ctx.now;
+  const searchTo = new Date(end.getTime() + 3 * 24 * 60 * 60_000); // look up to ~3 days out
+  const slots = await ctx.calendar.findFreeSlots({
+    from: searchFrom,
+    to: searchTo,
+    durationMinutes,
+    limit: 3,
+  });
+  if (slots.length > 0) {
+    out +=
+      '\nNearest open times:\n' +
+      slots.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
+  }
+  return out;
 }
 
 export const findFreeTime = defineTool({
@@ -80,21 +101,13 @@ export const findFreeTime = defineTool({
       from,
       to: input.to,
       durationMinutes: input.duration_minutes,
-      limit: 20,
+      limit: input.limit ?? 5,
     });
-    // Prefer sensible waking hours (8am–9pm local); fall back to any slot only
-    // if daytime is fully booked, so we never lead with a 2 AM suggestion.
-    const localHour = (d: Date): number =>
-      Number(
-        new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(d),
-      );
-    const daytime = slots.filter((s) => {
-      const h = localHour(s.start);
-      return h >= 8 && h < 21;
-    });
-    const chosen = (daytime.length > 0 ? daytime : slots).slice(0, input.limit ?? 5);
-    if (chosen.length === 0) return 'No open slots of that length in that window.';
-    return chosen.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
+    // No working-hours filter by design: the client schedules at ANY hour. Slots
+    // are earliest-first within the window the client asked about, so the window
+    // itself (e.g. "tomorrow afternoon") scopes the suggestions.
+    if (slots.length === 0) return 'No open slots of that length in that window.';
+    return slots.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
   },
 });
 

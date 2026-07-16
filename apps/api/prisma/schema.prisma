@@ -30,6 +30,12 @@ enum TaskStatus {
   done
 }
 
+enum RecurrenceFreq {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
 enum MessageDirection {
   inbound
   outbound
@@ -88,10 +94,11 @@ model Client {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tasks     Task[]
-  memories  Memory[]
-  messages  Message[]
-  auditLogs AuditLog[]
+  tasks          Task[]
+  memories       Memory[]
+  messages       Message[]
+  auditLogs      AuditLog[]
+  conflictAlerts CalendarConflictAlert[]
 
   @@index([status])
 }
@@ -125,6 +132,15 @@ model Task {
   /// keeps the same lead.
   reminderLeadMinutes Int?
 
+  /// Recurrence (null freq = one-shot). When set, the reminder cron re-arms the
+  /// SAME row to the next occurrence after each send instead of marking it done.
+  recurrenceFreq     RecurrenceFreq?
+  recurrenceInterval Int?            @default(1)
+  /// For WEEKLY: which weekdays (0=Sun … 6=Sat), e.g. [5] = every Friday.
+  recurrenceWeekdays Int[]           @default([])
+  /// Optional end of the series (inclusive-ish); past this, it stops.
+  recurrenceUntil    DateTime?
+
   notes String?
 
   createdAt DateTime @default(now())
@@ -144,14 +160,35 @@ model Memory {
   clientId String
   client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
-  key   String
-  value String
+  key      String
+  value    String
+  category MemoryCategory @default(LONGTERM)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // One value per key per client; upserts are the write path
   @@unique([clientId, key])
+}
+
+enum MemoryCategory {
+  PROFILE
+  PREFERENCE
+  LONGTERM
+}
+
+/// De-dup record for proactive "you have a double-booking" Telegram alerts, so
+/// the background calendar sweep alerts once per distinct conflict, not every
+/// tick. conflictKey is a stable hash of the two event ids + their start times.
+model CalendarConflictAlert {
+  id          String   @id @default(cuid())
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  conflictKey String
+  alertedAt   DateTime @default(now())
+
+  @@unique([clientId, conflictKey])
+  @@index([clientId, alertedAt])
 }
 
 model Message {

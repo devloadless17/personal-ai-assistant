@@ -1,4 +1,4 @@
-import { isOffsetlessIso, withClientOffset } from './time';
+import { isOffsetlessIso, isoInTz, nextOccurrence, withClientOffset } from './time';
 
 /**
  * The timezone guarantee: a wall-clock time with no offset must be interpreted
@@ -39,5 +39,49 @@ describe('time — client-timezone anchoring', () => {
   it('treats a date-only value as local midnight in the client zone', () => {
     const anchored = withClientOffset('2026-07-16', 'Asia/Beirut');
     expect(new Date(anchored).toISOString()).toBe('2026-07-15T21:00:00.000Z');
+  });
+});
+
+describe('nextOccurrence — recurring reminders (client-tz, DST-safe)', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (local: string): Date => new Date(withClientOffset(local, TZ));
+  const localDate = (d: Date): string => isoInTz(d, TZ).slice(0, 10);
+  const localHM = (d: Date): string => isoInTz(d, TZ).slice(11, 16);
+  const weekdayName = (d: Date): string =>
+    new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(d);
+
+  it('DAILY advances one local day, same local time', () => {
+    const r = nextOccurrence(at('2026-07-16T09:30:00'), 'DAILY', 1, [], TZ);
+    expect(localDate(r)).toBe('2026-07-17');
+    expect(localHM(r)).toBe('09:30');
+  });
+
+  it('DAILY preserves local time across a spring-forward DST change', () => {
+    // Beirut shifts +2 → +3 at the end of March; "09:30 every day" must stay 09:30.
+    const r = nextOccurrence(at('2026-03-28T09:30:00'), 'DAILY', 1, [], TZ);
+    expect(localDate(r)).toBe('2026-03-29');
+    expect(localHM(r)).toBe('09:30'); // NOT shifted by the DST hour
+  });
+
+  it('WEEKLY with no weekdays adds interval weeks', () => {
+    const r = nextOccurrence(at('2026-07-16T09:30:00'), 'WEEKLY', 1, [], TZ);
+    expect(localDate(r)).toBe('2026-07-23');
+    expect(localHM(r)).toBe('09:30');
+  });
+
+  it('WEEKLY on a specific weekday lands on the next such weekday', () => {
+    // weekdays [5] = Friday; result must be a Friday strictly after the anchor.
+    const start = at('2026-07-16T17:00:00');
+    const r = nextOccurrence(start, 'WEEKLY', 1, [5], TZ);
+    expect(weekdayName(r)).toBe('Fri');
+    expect(r.getTime()).toBeGreaterThan(start.getTime());
+    expect(localHM(r)).toBe('17:00');
+  });
+
+  it('MONTHLY clamps to the last day of a shorter month', () => {
+    // Jan 31 + 1 month → Feb 28 (2026 is not a leap year), same local time.
+    const r = nextOccurrence(at('2026-01-31T09:30:00'), 'MONTHLY', 1, [], TZ);
+    expect(localDate(r)).toBe('2026-02-28');
+    expect(localHM(r)).toBe('09:30');
   });
 });

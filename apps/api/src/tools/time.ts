@@ -118,3 +118,65 @@ export function endOfTodayInTz(now: Date, timeZone: string): Date {
   const nextish = new Date(start.getTime() + 26 * 60 * 60_000);
   return utcForLocalMidnight(localYmd(nextish, timeZone), timeZone);
 }
+
+export type RecurrenceFreq = 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+/**
+ * The next occurrence of a recurring reminder AFTER `current`, computed in the
+ * client's timezone so the LOCAL wall-clock time is preserved across DST (e.g.
+ * "every day at 9:30" stays 9:30 local even when the offset shifts). Month-end
+ * days are clamped (Jan 31 → Feb 28/29).
+ *
+ * `weekdays` uses 0=Sunday…6=Saturday. For WEEKLY with specific weekdays the
+ * interval is treated as 1 (covers "every Friday", "every weekday", "every Mon
+ * & Wed"); interval applies to DAILY, MONTHLY, and plain WEEKLY.
+ */
+export function nextOccurrence(
+  current: Date,
+  freq: RecurrenceFreq,
+  interval: number,
+  weekdays: number[],
+  timeZone: string,
+): Date {
+  const n = Math.max(1, Math.trunc(interval) || 1);
+  const iso = isoInTz(current, timeZone); // YYYY-MM-DDTHH:MM:SS±HH:MM
+  const dateParts = iso.slice(0, 10).split('-');
+  const y = Number(dateParts[0]);
+  const m = Number(dateParts[1]);
+  const d = Number(dateParts[2]);
+  const timePart = iso.slice(11, 19); // HH:MM:SS (local wall-clock, preserved)
+  // Bare calendar holder (UTC, no DST) purely for date arithmetic.
+  const cal = new Date(Date.UTC(y, m - 1, d));
+
+  // Rebuild a UTC instant from a local Y-M-D + the preserved wall-clock time.
+  const build = (cy: number, cm1: number, cd: number): Date => {
+    const daysInMonth = new Date(Date.UTC(cy, cm1, 0)).getUTCDate(); // cm1 = 1-based month
+    const day = Math.min(cd, daysInMonth);
+    const wall = `${String(cy).padStart(4, '0')}-${String(cm1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${timePart}`;
+    return new Date(withClientOffset(wall, timeZone));
+  };
+
+  if (freq === 'DAILY') {
+    cal.setUTCDate(cal.getUTCDate() + n);
+    return build(cal.getUTCFullYear(), cal.getUTCMonth() + 1, cal.getUTCDate());
+  }
+  if (freq === 'MONTHLY') {
+    const total = y * 12 + (m - 1) + n;
+    return build(Math.floor(total / 12), (total % 12) + 1, d);
+  }
+  // WEEKLY
+  if (weekdays.length === 0) {
+    cal.setUTCDate(cal.getUTCDate() + 7 * n);
+    return build(cal.getUTCFullYear(), cal.getUTCMonth() + 1, cal.getUTCDate());
+  }
+  const set = new Set(weekdays.map((w) => ((w % 7) + 7) % 7));
+  for (let i = 1; i <= 7; i++) {
+    const c = new Date(cal.getTime());
+    c.setUTCDate(c.getUTCDate() + i);
+    if (set.has(c.getUTCDay())) {
+      return build(c.getUTCFullYear(), c.getUTCMonth() + 1, c.getUTCDate());
+    }
+  }
+  cal.setUTCDate(cal.getUTCDate() + 7); // unreachable fallback
+  return build(cal.getUTCFullYear(), cal.getUTCMonth() + 1, cal.getUTCDate());
+}

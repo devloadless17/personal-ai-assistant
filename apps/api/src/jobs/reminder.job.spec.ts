@@ -13,7 +13,7 @@ const CLIENT = {
   telegramChatId: '777',
 };
 
-function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean }): {
+function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean; recurring?: boolean }): {
   job: ReminderJob;
   sent: string[];
   updates: { where: unknown; data: unknown }[];
@@ -32,6 +32,11 @@ function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean }): {
           dueAt: new Date('2026-07-16T10:00:00Z'),
           reminderAt: new Date('2026-07-16T09:55:00Z'),
           reminderSent: false,
+          reminderClaimedAt: null,
+          recurrenceFreq: opts?.recurring ? 'DAILY' : null,
+          recurrenceInterval: 1,
+          recurrenceWeekdays: [],
+          recurrenceUntil: null,
           client: CLIENT,
         },
       ]),
@@ -84,6 +89,18 @@ describe('ReminderJob — at-least-once lease/send/confirm', () => {
       where: { id: 't1' },
       data: { reminderSent: true },
     });
+  });
+
+  it('a RECURRING reminder re-arms to the next occurrence instead of marking sent', async () => {
+    const { job, sent, updates } = makeJob({ recurring: true });
+    await job.run(new Date('2026-07-16T10:00:00Z'));
+    expect(sent).toHaveLength(1);
+    // Final update rolls the row forward: new reminderAt (next day), re-armed.
+    const last = updates[updates.length - 1] as { data: Record<string, unknown> };
+    expect(last.data.reminderSent).toBe(false);
+    expect(last.data.reminderClaimedAt).toBeNull();
+    // DAILY from 2026-07-16T09:55Z (client tz UTC) → 2026-07-17T09:55Z.
+    expect((last.data.reminderAt as Date).toISOString()).toBe('2026-07-17T09:55:00.000Z');
   });
 
   it('does not send when the lease is lost (a concurrent tick holds it)', async () => {

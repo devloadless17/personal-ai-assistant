@@ -10,7 +10,10 @@ import type { ClientScopedRepository } from '../tenancy/client-scoped-repository
 
 const CLIENT = { id: 'c1', timezone: 'UTC', name: 'T', assistantName: 'A' } as Client;
 
-function makeGateway(existing: CalendarEvent[]): CalendarGateway & { created: CalendarEvent[] } {
+function makeGateway(
+  existing: CalendarEvent[],
+  freeSlots: { start: Date; end: Date }[] = [],
+): CalendarGateway & { created: CalendarEvent[] } {
   const created: CalendarEvent[] = [];
   return {
     created,
@@ -36,7 +39,7 @@ function makeGateway(existing: CalendarEvent[]): CalendarGateway & { created: Ca
           existing.filter((e) => e.id !== exclude && !e.allDay && e.start < end && e.end > start),
         ),
       ),
-    findFreeSlots: jest.fn().mockResolvedValue([]),
+    findFreeSlots: jest.fn().mockResolvedValue(freeSlots),
   };
 }
 
@@ -75,6 +78,24 @@ describe('calendar tools — conflict gating & honesty', () => {
     );
     expect(result).toContain('CONFLICT');
     expect(result).toContain('Board meeting');
+    expect(gw.created).toHaveLength(0);
+  });
+
+  it('a conflict result proactively includes concrete alternative open slots', async () => {
+    const gw = makeGateway([MEETING], [
+      { start: new Date('2026-07-17T12:00:00Z'), end: new Date('2026-07-17T13:00:00Z') },
+      { start: new Date('2026-07-17T16:00:00Z'), end: new Date('2026-07-17T17:00:00Z') },
+    ]);
+    const result = await createCalendarEvent.execute(
+      {
+        title: 'Overlap',
+        start: new Date('2026-07-17T10:30:00Z'),
+        end: new Date('2026-07-17T11:30:00Z'),
+      },
+      ctxWith(gw),
+    );
+    expect(result).toContain('CONFLICT');
+    expect(result).toContain('Nearest open times');
     expect(gw.created).toHaveLength(0);
   });
 

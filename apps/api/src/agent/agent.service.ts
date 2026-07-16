@@ -28,6 +28,7 @@ const MUTATING_TOOLS = new Set<string>([
   'update_calendar_event',
   'delete_calendar_event',
   'save_memory',
+  'forget_memory',
   'set_reminder_preference',
 ]);
 

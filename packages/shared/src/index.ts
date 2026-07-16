@@ -77,6 +77,16 @@ export interface PortalEvent {
   location: string | null;
 }
 
+export type MemoryCategory = 'PROFILE' | 'PREFERENCE' | 'LONGTERM';
+
+/** Something the assistant remembers about the client, shown in the portal. */
+export interface PortalMemory {
+  id: string;
+  key: string;
+  value: string;
+  category: MemoryCategory;
+}
+
 /** One audit-log row as shown on the dashboard. */
 export interface AuditLogEntry {
   id: string;

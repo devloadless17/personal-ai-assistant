@@ -1,0 +1,134 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
+import type { Client } from '@prisma/client';
+import { mapWithConcurrency } from '../common/concurrency';
+import { CryptoService } from '../crypto/crypto.service';
+import { GoogleCalendarGateway } from '../integrations/google/google-calendar.gateway';
+import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
+import { TelegramService } from '../integrations/telegram/telegram.service';
+import { PrismaService } from '../prisma/prisma.service';
+import type { CalendarEvent } from '../tools/tool.types';
+import { formatInTz } from '../tools/time';
+import { AdminAlertService } from './admin-alert.service';
+
+/** Look-ahead window for double-booking detection. */
+const HORIZON_MS = 48 * 60 * 60_000;
+/** How many clients to sweep in parallel (each does a live Google read). */
+const CONCURRENCY = 6;
+
+/**
+ * Every ~10 min: read each Google-connected client's live calendar for the near
+ * horizon and PROACTIVELY alert them on Telegram if two timed events overlap —
+ * even if the conflicting event was added directly in the Google Calendar app
+ * (which the on-demand booking check never sees until they next ask).
+ *
+ * Idempotent: each distinct conflict is de-duplicated by a unique
+ * (clientId, conflictKey), so a persisting overlap is alerted ONCE, not every
+ * tick. Reuses the "live reads, no mirror" model — no Google watch channels.
+ */
+@Injectable()
+export class CalendarSweepJob {
+  private readonly logger = new Logger(CalendarSweepJob.name);
+
+  // Heartbeat/observability — surfaced by GET /admin/diagnostics.
+  lastTickAt: Date | null = null;
+  lastAlertCount = 0;
+  lastError: string | null = null;
+  ticks = 0;
+  private running = false;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly google: GoogleOAuthService,
+    private readonly crypto: CryptoService,
+    private readonly telegram: TelegramService,
+    private readonly alerts: AdminAlertService,
+  ) {}
+
+  @Cron('*/10 * * * *')
+  async tick(): Promise<void> {
+    if (this.running) {
+      this.logger.warn('Previous calendar-sweep tick still running — skipping this one.');
+      return;
+    }
+    this.running = true;
+    this.lastTickAt = new Date();
+    this.ticks += 1;
+    try {
+      await this.run(this.lastTickAt);
+      this.lastError = null;
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Calendar-sweep tick failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+      await this.alerts.alert('sweep-tick', 'Calendar sweep job tick failed — check API logs.');
+    } finally {
+      this.running = false;
+    }
+  }
+
+  async run(now: Date): Promise<void> {
+    const clients = await this.prisma.client.findMany({
+      where: {
+        status: 'active',
+        telegramChatId: { not: null },
+        googleOAuthEnc: { not: null },
+      },
+    });
+    this.lastAlertCount = 0;
+    await mapWithConcurrency(clients, CONCURRENCY, (client) => this.sweepClient(client, now));
+  }
+
+  private async sweepClient(client: Client, now: Date): Promise<void> {
+    try {
+      const auth = await this.google.authorizedClientFor(client);
+      if (!auth) return;
+      const gateway = new GoogleCalendarGateway(auth, client.timezone);
+      const pairs = await gateway.findOverlappingPairs(now, new Date(now.getTime() + HORIZON_MS));
+      if (pairs.length === 0) return;
+
+      const botToken = client.telegramBotTokenEnc
+        ? this.crypto.decrypt(client.telegramBotTokenEnc)
+        : null;
+      if (!botToken || !client.telegramChatId) return;
+
+      for (const { a, b } of pairs) {
+        const conflictKey = this.conflictKey(a, b);
+        // Atomic de-dup: unique(clientId, conflictKey). If we've already alerted
+        // this exact conflict, the insert hits P2002 and we skip — one alert per
+        // distinct overlap, never a per-tick repeat.
+        try {
+          await this.prisma.calendarConflictAlert.create({
+            data: { clientId: client.id, conflictKey },
+          });
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') continue;
+          throw err;
+        }
+        const tz = client.timezone;
+        const msg =
+          `⚠️ Heads up — two things overlap on your calendar:\n` +
+          `• ${a.title} (${formatInTz(a.start, tz)})\n` +
+          `• ${b.title} (${formatInTz(b.start, tz)})\n` +
+          `Want me to move one?`;
+        await this.telegram.sendMessage(botToken, client.telegramChatId, msg);
+        this.lastAlertCount += 1;
+        this.logger.log(`Conflict alert sent to client ${client.id}`);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Calendar sweep failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** Stable key for a conflicting pair (order-independent), so it re-alerts only
+   * if an event actually moves to a different time. */
+  private conflictKey(a: CalendarEvent, b: CalendarEvent): string {
+    return [`${a.id}@${a.start.toISOString()}`, `${b.id}@${b.start.toISOString()}`]
+      .sort()
+      .join('||');
+  }
+}

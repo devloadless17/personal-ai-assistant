@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CalendarSweepJob } from './calendar-sweep.job';
 import { DailyBriefJob } from './daily-brief.job';
 import { ReminderJob } from './reminder.job';
 
@@ -29,6 +30,14 @@ export interface JobsDiagnostics {
       chatBound: boolean;
     }[];
   };
+  calendarSweep: {
+    running: boolean; // ticked within the last ~11 minutes (runs every 10)?
+    lastTickAt: string | null;
+    secondsSinceLastTick: number | null;
+    totalTicks: number;
+    lastAlertCount: number;
+    lastError: string | null;
+  };
   backlog: {
     overdueUnsent: number; // reminders past due but not yet delivered — should be ~0
     recent: {
@@ -53,6 +62,7 @@ export class JobsDiagnosticsService {
     private readonly prisma: PrismaService,
     private readonly reminder: ReminderJob,
     private readonly brief: DailyBriefJob,
+    private readonly sweep: CalendarSweepJob,
   ) {}
 
   async get(): Promise<JobsDiagnostics> {
@@ -64,6 +74,8 @@ export class JobsDiagnosticsService {
 
     const briefTick = this.brief.lastTickAt;
     const briefSince = briefTick ? Math.round((now.getTime() - briefTick.getTime()) / 1000) : null;
+    const sweepTick = this.sweep.lastTickAt;
+    const sweepSince = sweepTick ? Math.round((now.getTime() - sweepTick.getTime()) / 1000) : null;
     const briefClients = await this.prisma.client.findMany({
       where: { status: 'active' },
       select: {
@@ -116,6 +128,14 @@ export class JobsDiagnosticsService {
           lastBriefDate: c.lastBriefDate,
           chatBound: c.telegramChatId !== null,
         })),
+      },
+      calendarSweep: {
+        running: sweepSince !== null && sweepSince < 11 * 60,
+        lastTickAt: sweepTick?.toISOString() ?? null,
+        secondsSinceLastTick: sweepSince,
+        totalTicks: this.sweep.ticks,
+        lastAlertCount: this.sweep.lastAlertCount,
+        lastError: this.sweep.lastError,
       },
       backlog: {
         overdueUnsent,

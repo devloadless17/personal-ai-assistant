@@ -1,7 +1,48 @@
 import { z } from 'zod';
-import type { Task } from '@prisma/client';
+import type { RecurrenceFreq, Task } from '@prisma/client';
 import { defineTool } from './tool.types';
 import { formatInTz, isoDateTime } from './time';
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** How the model specifies recurrence; translated to the DB recurrence fields. */
+const repeatSchema = z.object({
+  freq: z.enum(['daily', 'weekly', 'monthly']),
+  interval: z.number().int().min(1).max(60).optional().describe('Every N periods (default 1).'),
+  weekdays: z
+    .array(z.number().int().min(0).max(6))
+    .optional()
+    .describe('WEEKLY only: which days (0=Sun … 6=Sat), e.g. [5]=Fri, [1,2,3,4,5]=weekdays.'),
+  until: isoDateTime.optional().describe('Optional end date; the series stops after this.'),
+});
+
+type RepeatInput = z.infer<typeof repeatSchema>;
+
+function repeatToFields(repeat: RepeatInput): {
+  recurrenceFreq: RecurrenceFreq;
+  recurrenceInterval: number;
+  recurrenceWeekdays: number[];
+  recurrenceUntil: Date | null;
+} {
+  return {
+    recurrenceFreq: repeat.freq.toUpperCase() as RecurrenceFreq,
+    recurrenceInterval: repeat.interval ?? 1,
+    recurrenceWeekdays: repeat.freq === 'weekly' ? (repeat.weekdays ?? []) : [],
+    recurrenceUntil: repeat.until ?? null,
+  };
+}
+
+function describeRecurrence(t: Task): string {
+  if (!t.recurrenceFreq) return '';
+  const n = t.recurrenceInterval ?? 1;
+  const every = n > 1 ? `every ${n} ` : 'every ';
+  if (t.recurrenceFreq === 'DAILY') return `${every}${n > 1 ? 'days' : 'day'}`;
+  if (t.recurrenceFreq === 'MONTHLY') return `${every}${n > 1 ? 'months' : 'month'}`;
+  if (t.recurrenceWeekdays.length > 0) {
+    return `every ${t.recurrenceWeekdays.map((w) => WEEKDAY_NAMES[w] ?? '?').join(', ')}`;
+  }
+  return `${every}${n > 1 ? 'weeks' : 'week'}`;
+}
 
 /**
  * Resolve the reminder time from either an absolute time or a lead offset.
@@ -35,6 +76,7 @@ function renderTask(t: Task, tz: string): string {
     t.dueAt ? `due ${formatInTz(t.dueAt, tz)}` : 'no due date',
   ];
   if (t.reminderAt) bits.push(`reminder ${formatInTz(t.reminderAt, tz)}`);
+  if (t.recurrenceFreq) bits.push(`repeats ${describeRecurrence(t)}`);
   if (t.notes) bits.push(`notes: ${t.notes}`);
   return bits.join(' — ');
 }
@@ -89,6 +131,11 @@ export const createTask = defineTool({
     reminder_at: isoDateTime
       .optional()
       .describe('Exact reminder datetime (ISO 8601). Use only when the client names a specific time.'),
+    repeat: repeatSchema
+      .optional()
+      .describe(
+        'Make it a RECURRING reminder ("every Friday", "every day", "monthly"). The first reminder time (reminder_at or due_at) is the anchor; it re-fires each period.',
+      ),
     notes: z.string().max(2000).optional().describe('Extra details, if any.'),
   }),
   async execute(input, ctx) {
@@ -96,6 +143,7 @@ export const createTask = defineTool({
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was created.`;
     const type = input.type ?? 'task';
     let reminderAt = rem.changed ? rem.value : null;
+    let dueAt = input.due_at ?? null;
     // App-owned guarantee: a REMINDER must actually fire. The model sometimes
     // sets a due time but forgets the reminder fields — leaving reminderAt null,
     // which the cron can never match (silent no-op). So for a reminder with a
@@ -104,15 +152,26 @@ export const createTask = defineTool({
     // model to remember this. `!rem.changed` means the model gave no reminder
     // field at all — an explicit `reminder_minutes_before: 0` (rem.changed with
     // value null) is a deliberate "no reminder" and is respected.
-    if (type === 'reminder' && !rem.changed && input.due_at) {
-      reminderAt = input.due_at;
+    if (type === 'reminder' && !rem.changed && dueAt) {
+      reminderAt = dueAt;
+    }
+    // Symmetry: a reminder given only as a ping time ("remind me at 9:30") has
+    // no due time — treat the ping time AS its scheduled time so it always
+    // carries a date (never shows "no date") and appears in day/task views.
+    if (type === 'reminder' && dueAt === null && reminderAt) {
+      dueAt = reminderAt;
+    }
+    // A recurring reminder needs an anchor time to re-fire from.
+    if (input.repeat && !reminderAt) {
+      return 'ERROR: a recurring reminder needs a time — set reminder_at (or due_at). Nothing was created.';
     }
     const task = await ctx.repo.createTask({
       title: input.title,
       type: input.type,
-      dueAt: input.due_at ?? null,
+      dueAt,
       reminderAt,
       notes: input.notes ?? null,
+      ...(input.repeat ? repeatToFields(input.repeat) : {}),
     });
     return `Created: ${renderTask(task, ctx.client.timezone)}`;
   },
@@ -140,10 +199,14 @@ export const updateTask = defineTool({
       .nullable()
       .optional()
       .describe('New exact reminder datetime, or null to clear.'),
+    repeat: repeatSchema
+      .nullable()
+      .optional()
+      .describe('Set/replace the recurrence, or null to STOP repeating ("stop reminding me every Friday").'),
     notes: z.string().max(2000).nullable().optional(),
   }),
   async execute(input, ctx) {
-    const { task_id, due_at, reminder_at, reminder_minutes_before, ...rest } = input;
+    const { task_id, due_at, reminder_at, reminder_minutes_before, repeat, ...rest } = input;
 
     // We may need the existing task to resolve a lead-time, to keep a
     // reminder's lead when only the due time moves, OR to honour the
@@ -188,12 +251,35 @@ export const updateTask = defineTool({
       rem = { changed: true, value: effectiveDue };
     }
 
+    // Symmetry (mirror of create_task): a reminder given only a ping time and no
+    // due time gets its scheduled time = the ping time, so it always carries a
+    // date (never "no date").
+    const resultingReminder = rem.changed ? rem.value : (existing?.reminderAt ?? null);
+    const backfillDue =
+      effectiveType === 'reminder' && effectiveDue === null && resultingReminder !== null
+        ? resultingReminder
+        : undefined;
+
+    // Recurrence: an object sets/replaces it; `null` stops the series; `undefined`
+    // (omitted) leaves it as-is.
+    const recurrencePatch =
+      repeat === undefined
+        ? {}
+        : repeat === null
+          ? { recurrenceFreq: null, recurrenceInterval: 1, recurrenceWeekdays: [], recurrenceUntil: null }
+          : repeatToFields(repeat);
+
     const task = await ctx.repo.updateTask(task_id, {
       ...rest,
-      ...(due_at !== undefined ? { dueAt: due_at } : {}),
+      ...(due_at !== undefined
+        ? { dueAt: due_at }
+        : backfillDue
+          ? { dueAt: backfillDue }
+          : {}),
       ...(rem.changed
         ? { reminderAt: rem.value, reminderSent: false } // rescheduled reminder re-arms
         : {}),
+      ...recurrencePatch,
     });
     if (!task) return `ERROR: no task with id ${task_id} exists for this client. Nothing was changed.`;
     return `Updated: ${renderTask(task, ctx.client.timezone)}`;

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { ClientMe, PortalEvent, PortalTask } from "@assistant/shared";
+import type { ClientMe, PortalEvent, PortalMemory, PortalTask } from "@assistant/shared";
 import { clearClientToken, getClientToken, portalApi } from "@/lib/portal-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,18 +21,21 @@ export default function PortalPage() {
   const [calendar, setCalendar] = useState<{ connected: boolean; events: PortalEvent[] } | null>(
     null,
   );
+  const [memories, setMemories] = useState<PortalMemory[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [m, t, c] = await Promise.all([
+      const [m, t, c, mem] = await Promise.all([
         portalApi<ClientMe>("/client/me"),
         portalApi<PortalTask[]>("/client/tasks"),
         portalApi<{ connected: boolean; events: PortalEvent[] }>("/client/calendar"),
+        portalApi<PortalMemory[]>("/client/memory"),
       ]);
       setMe(m);
       setTasks(t);
       setCalendar(c);
+      setMemories(mem);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load your data");
     }
@@ -138,8 +141,19 @@ export default function PortalPage() {
               {tasks.map((t) => (
                 <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
                   <span className="text-sm">{t.title}</span>
-                  <span className="whitespace-nowrap text-xs text-muted-foreground">
-                    {t.dueAt ? formatDate(t.dueAt, me.timezone) : "no date"}
+                  <span className="text-right text-xs text-muted-foreground">
+                    <span className="block whitespace-nowrap">
+                      {t.dueAt
+                        ? formatDate(t.dueAt, me.timezone)
+                        : t.reminderAt
+                          ? `⏰ ${formatDate(t.reminderAt, me.timezone)}`
+                          : "no date"}
+                    </span>
+                    {t.dueAt && t.reminderAt && t.reminderAt !== t.dueAt && (
+                      <span className="block whitespace-nowrap text-[11px] opacity-80">
+                        ⏰ {formatDate(t.reminderAt, me.timezone)}
+                      </span>
+                    )}
                   </span>
                 </li>
               ))}
@@ -147,7 +161,87 @@ export default function PortalPage() {
           )}
         </CardContent>
       </Card>
+
+      <AssistantMemory memories={memories} onChanged={load} />
     </main>
+  );
+}
+
+const MEMORY_GROUPS: { key: PortalMemory["category"]; label: string }[] = [
+  { key: "PROFILE", label: "Profile" },
+  { key: "PREFERENCE", label: "Preferences" },
+  { key: "LONGTERM", label: "Long-term" },
+];
+
+function AssistantMemory({
+  memories,
+  onChanged,
+}: {
+  memories: PortalMemory[];
+  onChanged: () => void | Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const remove = async (id: string) => {
+    setBusyId(id);
+    try {
+      await portalApi(`/client/memory/${id}`, { method: "DELETE" });
+      await onChanged();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>What your assistant knows about you</CardTitle>
+        <CardDescription>
+          Facts and preferences your assistant remembers. Remove anything you don&apos;t want it to
+          keep — or just tell it &quot;forget that&quot; on Telegram.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {memories.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Nothing remembered yet. As you chat, your assistant will learn your preferences.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {MEMORY_GROUPS.map(({ key, label }) => {
+              const items = memories.filter((m) => m.category === key);
+              if (items.length === 0) return null;
+              return (
+                <div key={key}>
+                  <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    {label}
+                  </p>
+                  <ul className="space-y-1">
+                    {items.map((m) => (
+                      <li
+                        key={m.id}
+                        className="flex items-start justify-between gap-3 border-b pb-1 last:border-0"
+                      >
+                        <span className="text-sm">{m.value}</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busyId === m.id}
+                          onClick={() => void remove(m.id)}
+                          aria-label={`Forget ${m.key}`}
+                        >
+                          Remove
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

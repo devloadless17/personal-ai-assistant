@@ -202,10 +202,26 @@ schema, execute})`, register it in `tools/index.ts` (append — order is part of
 prompt cache), and it's live: schema generation, validation, audit logging, and the
 dashboard audit view all pick it up automatically. `send_email` later = one file.
 
+## Scaling background jobs (when to move off in-process cron)
+
+Jobs (reminders every minute, daily brief + calendar-conflict sweep every 10 min) run as
+**in-process `@nestjs/schedule` cron**. This is reliable, not just convenient: reminder
+delivery is **at-least-once** (a DB `reminderClaimedAt` lease survives a crash between claim
+and send), each job has an **overlap guard** and a **boot catch-up**, and per-client work
+runs with **bounded concurrency** (`mapWithConcurrency`, ~6 at a time) so a single tick
+scales to many clients without overrunning its interval. `GET /admin/diagnostics` reports
+each job's heartbeat.
+
+Adopt **BullMQ + Redis only when running more than one API instance** — the trigger is
+horizontal scale, not reliability. At that point: (1) move the per-client Telegram
+serialization `Map` and (2) the cron triggers to the shared queue; the job *bodies* (lease
+claim, idempotent sends, once-per-day brief claim, conflict de-dup) already work unchanged
+under a shared queue. Bounded concurrency buys substantial headroom before that point.
+
 ## Known limits (v1, by design)
 
 - Per-client message serialization is in-process — correct for the single API
-  container; scale-out to multiple API instances needs a shared queue (BullMQ).
+  container; scale-out to multiple API instances needs a shared queue (BullMQ, see above).
 - **Portal OAuth login state is in-process** — fine for the single API container; a
   multi-instance deployment needs it in a shared store (DB/Redis), and the login flow
   would then also gain browser-bound state (cookie/PKCE) as CSRF hardening.

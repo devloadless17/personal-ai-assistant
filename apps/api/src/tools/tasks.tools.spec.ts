@@ -60,6 +60,18 @@ describe('tasks tools — reminder firing guarantee', () => {
     expect(created[0]?.reminderAt).toEqual(new Date('2026-07-16T18:30:00Z'));
   });
 
+  it('a reminder given only a ping time ("remind me at 9:30") also gets dueAt = that time', async () => {
+    const { ctx, created } = ctxCapturing();
+    await createTask.execute(
+      { title: 'Take a shower', type: 'reminder', reminder_at: new Date('2026-07-16T09:30:00Z') },
+      ctx,
+    );
+    expect(created).toHaveLength(1);
+    // Both carry the time → never shows "no date", and it still fires.
+    expect(created[0]?.reminderAt).toEqual(new Date('2026-07-16T09:30:00Z'));
+    expect(created[0]?.dueAt).toEqual(new Date('2026-07-16T09:30:00Z'));
+  });
+
   it('an explicit reminder_minutes_before still wins over the default', async () => {
     const { ctx, created } = ctxCapturing();
     await createTask.execute(
@@ -72,6 +84,40 @@ describe('tasks tools — reminder firing guarantee', () => {
       ctx,
     );
     expect(created[0]?.reminderAt).toEqual(new Date('2026-07-16T17:45:00Z'));
+  });
+
+  it('a recurring reminder persists its recurrence fields', async () => {
+    const { ctx, created } = ctxCapturing();
+    await createTask.execute(
+      {
+        title: 'Submit reports',
+        type: 'reminder',
+        reminder_at: new Date('2026-07-17T14:00:00Z'),
+        repeat: { freq: 'weekly', weekdays: [5] },
+      },
+      ctx,
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]?.recurrenceFreq).toBe('WEEKLY');
+    expect(created[0]?.recurrenceWeekdays).toEqual([5]);
+    expect(created[0]?.reminderAt).toEqual(new Date('2026-07-17T14:00:00Z'));
+  });
+
+  it('a recurring reminder with no time is rejected (needs an anchor)', async () => {
+    const { ctx, created } = ctxCapturing();
+    const res = await createTask.execute(
+      { title: 'nope', type: 'reminder', repeat: { freq: 'daily' } },
+      ctx,
+    );
+    expect(res).toContain('ERROR');
+    expect(created).toHaveLength(0);
+  });
+
+  it('update_task with repeat:null stops the series', async () => {
+    const { ctx, updates } = ctxCapturing();
+    await updateTask.execute({ task_id: 'task-1', repeat: null }, ctx);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.recurrenceFreq).toBeNull();
   });
 
   it('a plain TASK with a due date is NOT forced to have a reminder', async () => {

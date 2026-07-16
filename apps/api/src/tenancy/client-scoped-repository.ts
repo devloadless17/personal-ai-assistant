@@ -1,4 +1,13 @@
-import type { Prisma, PrismaClient, Task, Memory, Message, AuditLog } from '@prisma/client';
+import type {
+  Prisma,
+  PrismaClient,
+  Task,
+  Memory,
+  Message,
+  AuditLog,
+  RecurrenceFreq,
+  MemoryCategory,
+} from '@prisma/client';
 
 /**
  * THE tenant-isolation choke point.
@@ -71,6 +80,10 @@ export class ClientScopedRepository {
     notes?: string | null;
     sourceEventId?: string | null;
     reminderLeadMinutes?: number | null;
+    recurrenceFreq?: RecurrenceFreq | null;
+    recurrenceInterval?: number | null;
+    recurrenceWeekdays?: number[];
+    recurrenceUntil?: Date | null;
   }): Promise<Task> {
     return this.prisma.task.create({ data: { ...data, clientId: this.clientId } });
   }
@@ -102,6 +115,10 @@ export class ClientScopedRepository {
       reminderAt: Date | null;
       reminderSent: boolean;
       notes: string | null;
+      recurrenceFreq: RecurrenceFreq | null;
+      recurrenceInterval: number | null;
+      recurrenceWeekdays: number[];
+      recurrenceUntil: Date | null;
     }>,
   ): Promise<Task | null> {
     const { count } = await this.prisma.task.updateMany({
@@ -148,17 +165,38 @@ export class ClientScopedRepository {
     });
   }
 
-  async saveMemory(key: string, value: string): Promise<Memory> {
+  async saveMemory(key: string, value: string, category?: MemoryCategory): Promise<Memory> {
     return this.prisma.memory.upsert({
       where: { clientId_key: { clientId: this.clientId, key } },
-      create: { clientId: this.clientId, key, value },
-      update: { value },
+      create: { clientId: this.clientId, key, value, ...(category ? { category } : {}) },
+      update: { value, ...(category ? { category } : {}) },
     });
   }
 
   async deleteMemory(key: string): Promise<boolean> {
     const { count } = await this.prisma.memory.deleteMany({
       where: { clientId: this.clientId, key },
+    });
+    return count > 0;
+  }
+
+  /** Update a memory's value/category by id (tenant-scoped). Null = not found. */
+  async updateMemory(
+    id: string,
+    data: Partial<{ value: string; category: MemoryCategory }>,
+  ): Promise<Memory | null> {
+    const { count } = await this.prisma.memory.updateMany({
+      where: { id, clientId: this.clientId },
+      data,
+    });
+    if (count === 0) return null;
+    return this.prisma.memory.findFirst({ where: { id, clientId: this.clientId } });
+  }
+
+  /** Delete a memory by id (tenant-scoped). False if nothing matched. */
+  async deleteMemoryById(id: string): Promise<boolean> {
+    const { count } = await this.prisma.memory.deleteMany({
+      where: { id, clientId: this.clientId },
     });
     return count > 0;
   }

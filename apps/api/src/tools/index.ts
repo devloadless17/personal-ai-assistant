@@ -1,6 +1,6 @@
 import type { ToolDefinition } from './tool.types';
 import { completeTask, createTask, deleteTask, getTasks, updateTask } from './tasks.tools';
-import { getProfile, saveMemory, setReminderPreference } from './memory.tools';
+import { forgetMemory, getProfile, saveMemory, setReminderPreference } from './memory.tools';
 import {
   createCalendarEvent,
   deleteCalendarEvent,
@@ -30,5 +30,6 @@ export const ALL_TOOLS: ToolDefinition<never>[] = [
   deleteCalendarEvent,
   getProfile,
   saveMemory,
+  forgetMemory,
   setReminderPreference,
 ] as ToolDefinition<never>[];

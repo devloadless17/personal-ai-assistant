@@ -120,25 +120,58 @@ export class GoogleCalendarGateway implements CalendarGateway {
   }): Promise<{ start: Date; end: Date }[]> {
     const { from, to, durationMinutes, limit = 5 } = params;
     const durationMs = durationMinutes * 60_000;
+    // Offer DISTINCT candidate start times (not just one per gap): step through
+    // each free gap so a wide-open window yields several options to choose from.
+    const stepMs = Math.max(durationMs, 30 * 60_000);
     const busy = (await this.listEvents({ from, to, limit: 100 }))
       .filter((e) => !e.allDay)
       .map((e) => ({ start: e.start, end: e.end }))
       .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-    const slots: { start: Date; end: Date }[] = [];
+    // Build free gaps between busy blocks (merging overlaps via the cursor).
+    const gaps: { start: Date; end: Date }[] = [];
     let cursor = from;
     for (const block of busy) {
-      if (slots.length >= limit) break;
       if (block.start.getTime() - cursor.getTime() >= durationMs) {
-        slots.push({ start: cursor, end: new Date(cursor.getTime() + durationMs) });
+        gaps.push({ start: cursor, end: block.start });
       }
       if (block.end > cursor) cursor = block.end;
     }
-    // Trailing gap after the last busy block.
-    if (slots.length < limit && to.getTime() - cursor.getTime() >= durationMs) {
-      slots.push({ start: cursor, end: new Date(cursor.getTime() + durationMs) });
+    if (to.getTime() - cursor.getTime() >= durationMs) gaps.push({ start: cursor, end: to });
+
+    const slots: { start: Date; end: Date }[] = [];
+    for (const gap of gaps) {
+      let s = gap.start.getTime();
+      while (s + durationMs <= gap.end.getTime() && slots.length < limit) {
+        slots.push({ start: new Date(s), end: new Date(s + durationMs) });
+        s += stepMs;
+      }
+      if (slots.length >= limit) break;
     }
-    return slots.slice(0, limit);
+    return slots;
+  }
+
+  /** All pairs of overlapping TIMED events in [from, to) — for background
+   * double-booking detection (all-day events don't block, as elsewhere). */
+  async findOverlappingPairs(
+    from: Date,
+    to: Date,
+  ): Promise<{ a: CalendarEvent; b: CalendarEvent }[]> {
+    const events = (await this.listEvents({ from, to, limit: 100 }))
+      .filter((e) => !e.allDay)
+      .sort((x, y) => x.start.getTime() - y.start.getTime());
+    const pairs: { a: CalendarEvent; b: CalendarEvent }[] = [];
+    for (let i = 0; i < events.length; i++) {
+      const a = events[i];
+      if (!a) continue;
+      for (let j = i + 1; j < events.length; j++) {
+        const b = events[j];
+        if (!b) continue;
+        if (b.start >= a.end) break; // sorted by start → no later event can overlap a
+        if (a.start < b.end && a.end > b.start) pairs.push({ a, b });
+      }
+    }
+    return pairs;
   }
 
   private toEvent(e: calendar_v3.Schema$Event): CalendarEvent {

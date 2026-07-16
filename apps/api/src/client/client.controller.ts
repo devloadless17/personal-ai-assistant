@@ -1,8 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   NotFoundException,
+  Param,
   Patch,
   Query,
   Req,
@@ -13,7 +16,7 @@ import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { z } from 'zod';
-import type { ClientMe, PortalEvent, PortalTask } from '@assistant/shared';
+import type { ClientMe, PortalEvent, PortalMemory, PortalTask } from '@assistant/shared';
 import { GoogleCalendarGateway } from '../integrations/google/google-calendar.gateway';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -35,6 +38,15 @@ const preferencesSchema = z
   })
   .refine((v) => v.defaultReminderMinutes !== undefined || v.dailyBriefHour !== undefined, {
     message: 'Provide at least one preference to update.',
+  });
+
+const memoryUpdateSchema = z
+  .object({
+    value: z.string().min(1).max(2000).optional(),
+    category: z.enum(['PROFILE', 'PREFERENCE', 'LONGTERM']).optional(),
+  })
+  .refine((v) => v.value !== undefined || v.category !== undefined, {
+    message: 'Provide a value or category to update.',
   });
 
 /**
@@ -134,6 +146,48 @@ export class ClientController {
       reminderAt: t.reminderAt?.toISOString() ?? null,
       notes: t.notes,
     }));
+  }
+
+  // ── Memory (what the assistant knows — the client can view/edit/forget it) ──
+
+  @UseGuards(ClientAuthGuard)
+  @Get('memory')
+  async memory(@Req() req: ClientRequest): Promise<PortalMemory[]> {
+    const repo = this.tenancy.repoFor(req.client.sub);
+    const memories = await repo.getMemories(200);
+    return memories.map((m) => ({
+      id: m.id,
+      key: m.key,
+      value: m.value,
+      category: m.category,
+    }));
+  }
+
+  @UseGuards(ClientAuthGuard)
+  @Patch('memory/:id')
+  async updateMemory(
+    @Req() req: ClientRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<PortalMemory> {
+    const data = memoryUpdateSchema.parse(body);
+    const repo = this.tenancy.repoFor(req.client.sub);
+    const updated = await repo.updateMemory(id, data);
+    if (!updated) throw new NotFoundException('Memory not found');
+    return { id: updated.id, key: updated.key, value: updated.value, category: updated.category };
+  }
+
+  @UseGuards(ClientAuthGuard)
+  @Delete('memory/:id')
+  @HttpCode(200)
+  async deleteMemory(
+    @Req() req: ClientRequest,
+    @Param('id') id: string,
+  ): Promise<{ ok: true }> {
+    const repo = this.tenancy.repoFor(req.client.sub);
+    const removed = await repo.deleteMemoryById(id);
+    if (!removed) throw new NotFoundException('Memory not found');
+    return { ok: true };
   }
 
   @UseGuards(ClientAuthGuard)
