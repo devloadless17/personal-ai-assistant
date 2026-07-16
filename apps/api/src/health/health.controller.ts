@@ -1,8 +1,11 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 // Single source of truth for the health contract — shared with the dashboard.
 import type { HealthReport } from '@assistant/shared';
 import { PrismaService } from '../prisma/prisma.service';
 
+// Container healthchecks poll this — never rate-limit them.
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}

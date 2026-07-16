@@ -1,12 +1,22 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import helmet from 'helmet';
+import { json } from 'express';
 import { AppModule } from './app.module';
 import type { Env } from './config/env.validation';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableShutdownHooks();
+
+  // Behind the reverse proxy: real client IPs for rate limiting/logs.
+  app.set('trust proxy', 1);
+  // Security headers on API responses (OAuth callback page included).
+  app.use(helmet());
+  // Telegram updates and admin payloads are small — cap bodies hard.
+  app.use(json({ limit: '256kb' }));
 
   const config = app.get(ConfigService<Env, true>);
   const port = config.get('API_PORT', { infer: true });

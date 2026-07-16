@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
 import { AdminAuthGuard } from './admin-auth.guard';
@@ -41,6 +42,8 @@ export class AdminController {
     private readonly clients: AdminClientsService,
   ) {}
 
+  // Brute-force wall: 5 login attempts per minute per IP.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('auth/login')
   @HttpCode(200)
   async login(@Body() body: unknown): Promise<{ token: string }> {

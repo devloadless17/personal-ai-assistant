@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AdminModule } from './admin/admin.module';
 import { AgentModule } from './agent/agent.module';
 import { validateEnv } from './config/env.validation';
@@ -20,6 +22,9 @@ import { TenancyModule } from './tenancy/tenancy.module';
       // .env lives at the repo root so api + docker share one source of truth
       envFilePath: ['../../.env', '.env'],
     }),
+    // Global rate limit (per IP): generous for normal use, a wall for abuse.
+    // Login gets a much tighter limit via @Throttle on the endpoint.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 120 }]),
     PrismaModule,
     CryptoModule,
     TenancyModule,
@@ -32,5 +37,6 @@ import { TenancyModule } from './tenancy/tenancy.module';
     // Dev-only chat harness — never registered outside development.
     ...(process.env.NODE_ENV === 'development' ? [DevModule] : []),
   ],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

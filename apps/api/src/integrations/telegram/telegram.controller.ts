@@ -8,6 +8,7 @@ import {
   Param,
   Post,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { CryptoService } from '../../crypto/crypto.service';
 import { TenancyService } from '../../tenancy/tenancy.service';
 import { TelegramUpdateProcessor } from './telegram-update.processor';
@@ -24,6 +25,10 @@ import { telegramUpdateSchema } from './telegram.types';
  *   irrelevant updates are acked too (returning errors would make Telegram
  *   redeliver garbage forever).
  */
+// Rate limiting doesn't apply here: Telegram fans out many clients' updates
+// from a handful of server IPs, and every request is already authenticated
+// by the per-client secret token before any work happens.
+@SkipThrottle()
 @Controller('telegram')
 export class TelegramController {
   constructor(
