@@ -1,9 +1,9 @@
 # Production stack for the VPS — REGISTRY images (no build on the server).
 #
 # CI builds + pushes the api/web images to Docker Hub and this file pulls them,
-# pinned to an immutable per-commit tag (IMAGE_TAG in .env). Postgres is NOT in
-# this stack — it is your existing VPS Postgres, reached over DATABASE_URL
-# (host.docker.internal maps to the VPS host, see extra_hosts below).
+# pinned to an immutable per-commit tag (IMAGE_TAG in .env). Postgres runs as a
+# container IN this stack; its data lives in the `pgdata` volume and survives
+# every redeploy (only api/web are recreated on deploy).
 #
 # The deploy job ships this file, Caddyfile, and the rendered .env FLAT into the
 # deploy dir, then runs (from that dir):
@@ -16,6 +16,31 @@
 name: personal-ai-assistant
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: assistant_postgres
+    restart: always
+    # Initialized from these on FIRST boot only (empty volume); afterwards the
+    # data in pgdata is authoritative. Changing POSTGRES_PASSWORD later does NOT
+    # rotate the existing DB password — do that with ALTER ROLE.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
+      POSTGRES_DB: ${POSTGRES_DB:-assistant}
+    security_opt:
+      - no-new-privileges:true
+    # Not published to the host — only the api (same Docker network) reaches it.
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-assistant} -d ${POSTGRES_DB:-assistant}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     image: ${DOCKER_USERNAME}/personal-ai-assistant-api:${IMAGE_TAG:-latest}
     container_name: assistant_api
@@ -29,13 +54,15 @@ services:
       API_PORT: "3001"
     security_opt:
       - no-new-privileges:true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     expose:
       - "3001"
     # The image's CMD runs `prisma migrate deploy` before booting node, so
     # schema changes apply automatically on every deploy; a failed migration
-    # stops the boot and the health gate below fails the deploy.
+    # stops the boot and the health gate below fails the deploy. Waits for the
+    # DB to be healthy first so the boot migration can't race an unready Postgres.
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/health"]
       interval: 30s
@@ -85,5 +112,6 @@ services:
       - web
 
 volumes:
+  pgdata:
   caddy_data:
   caddy_config:

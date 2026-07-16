@@ -123,14 +123,30 @@ In [console.cloud.google.com](https://console.cloud.google.com) with your existi
 1. **Create the bot**: in Telegram, talk to **@BotFather** → `/newbot` → name it (e.g.
    "Sarah's Assistant") → copy the token.
 2. **Dashboard → New client**: name, IANA timezone (e.g. `Asia/Riyadh`), assistant name.
-3. **Client page → Setup → Telegram**: paste the bot token → Connect. The token is
+3. Optionally set the client's **Gmail** — this lets them use the self-service portal
+   (below). Leave blank to keep them Telegram-only.
+4. **Client page → Setup → Telegram**: paste the bot token → Connect. The token is
    validated, encrypted, and the webhook (with a fresh secret) registered automatically.
-4. **Setup → Google Calendar → Generate connection link** → send the link to the client.
+5. **Setup → Google Calendar → Generate connection link** → send the link to the client.
    They sign in with their Google account and approve calendar access (15-min link;
    no password ever touches this system).
-5. Tell the client to open their bot and say hi. The **first private chat binds** to
+6. Tell the client to open their bot and say hi. The **first private chat binds** to
    the client; all other chats are refused.
-6. Watch the **Audit log** tab — every tool call (input, result, success) appears there.
+7. Watch the **Audit log** tab — every tool call (input, result, success) appears there.
+
+### Client self-service portal (optional)
+
+If you set a client's Gmail, they can log into a lightweight portal at **/portal**:
+- **Sign in with Google** — one consent proves their identity *and* grants calendar
+  access. Only Gmails you've assigned can log in (no open sign-up).
+- They see their **live calendar** (next 7 days) and **open tasks**, and can paste their
+  own Telegram bot token to self-connect.
+- A client session is strictly scoped to that one client — the token carries a
+  `type: "client"` claim that cannot be used on admin routes (and admin tokens cannot be
+  used on client routes). Disabling a client revokes portal access on the next request.
+- Google Console: add a second authorized redirect URI —
+  `https://assistant.yourdomain.com/api/client/auth/google/callback` (local:
+  `http://localhost:3001/client/auth/google/callback`).
 
 **Disable a client** (Setup → status): webhooks are rejected and jobs skip them
 immediately; history and audit log are kept. Deleting audit history is deliberately
@@ -190,6 +206,11 @@ dashboard audit view all pick it up automatically. `send_email` later = one file
 
 - Per-client message serialization is in-process — correct for the single API
   container; scale-out to multiple API instances needs a shared queue (BullMQ).
+- **Portal OAuth login state is in-process** — fine for the single API container; a
+  multi-instance deployment needs it in a shared store (DB/Redis), and the login flow
+  would then also gain browser-bound state (cookie/PKCE) as CSRF hardening.
+- Portal client tokens live in `localStorage` with a 30-day TTL; on the sensitive
+  Telegram-connect route the client's active status is re-checked every request.
 - Telegram: text messages only (voice/photos get a polite "text only" reply).
 - Calendar: the client's primary Google calendar.
 - Deleting a client with audit history is blocked (disable instead) until an explicit

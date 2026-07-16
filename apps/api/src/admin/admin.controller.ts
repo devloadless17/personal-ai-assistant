@@ -22,7 +22,7 @@ const createClientSchema = z.object({
   name: z.string().min(1).max(200),
   timezone: z.string().min(1),
   assistantName: z.string().min(1).max(100).default('Assistant'),
-  email: z.string().email().optional(),
+  email: z.string().email().toLowerCase().optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });
 
@@ -30,7 +30,7 @@ const updateClientSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   timezone: z.string().min(1).optional(),
   assistantName: z.string().min(1).max(100).optional(),
-  email: z.string().email().optional(),
+  email: z.string().email().toLowerCase().optional(),
   status: z.enum(['active', 'disabled']).optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });

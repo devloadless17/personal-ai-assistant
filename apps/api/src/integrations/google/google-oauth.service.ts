@@ -184,8 +184,12 @@ export class GoogleOAuthService {
   buildClientLoginUrl(): string {
     const oauth = this.newLoginOAuthClient();
     const state = randomBytes(24).toString('hex');
-    this.pendingLoginStates.set(state, Date.now() + 15 * 60_000);
     this.gcStates();
+    // Hard cap as a memory backstop (throttling is the primary defence).
+    if (this.pendingLoginStates.size > 10_000) {
+      throw new Error('Too many pending logins — try again shortly.');
+    }
+    this.pendingLoginStates.set(state, Date.now() + 15 * 60_000);
     return oauth.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',

@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SkipThrottle, Throttle } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { z } from 'zod';
 import type { ClientMe, PortalEvent, PortalTask } from '@assistant/shared';
@@ -47,14 +47,15 @@ export class ClientController {
 
   // ── Auth (Sign in with Google) ─────────────────────────────────────────────
 
-  @SkipThrottle()
+  // Bounded per-IP: enough for real logins, a wall against state-map flooding.
+  @Throttle({ default: { ttl: 60_000, limit: 20 } })
   @Get('auth/google/start')
   start(): { url: string } {
     return { url: this.auth.buildLoginUrl() };
   }
 
   /** Google redirects here; we mint a session token and hand off to the portal. */
-  @SkipThrottle()
+  @Throttle({ default: { ttl: 60_000, limit: 20 } })
   @Get('auth/google/callback')
   async callback(
     @Query('code') code: string | undefined,

@@ -7,6 +7,11 @@ import type { Env } from '../config/env.validation';
 
 export interface AdminJwtPayload {
   sub: string;
+  // Distinguishes admin tokens from client-portal tokens. Both are signed
+  // with the same JWT_SECRET, so WITHOUT this discriminator a client's portal
+  // token would pass admin verification — a privilege-escalation hole. Both
+  // guards enforce their own type.
+  type: 'admin';
   email: string;
 }
 
@@ -50,15 +55,23 @@ export class AdminAuthService implements OnModuleInit {
     const ok = admin ? await compare(password, admin.passwordHash) : false;
     if (!admin || !ok) throw new UnauthorizedException('Invalid email or password');
 
-    const payload: AdminJwtPayload = { sub: admin.id, email: admin.email };
+    const payload: AdminJwtPayload = { sub: admin.id, type: 'admin', email: admin.email };
     return { token: await this.jwt.signAsync(payload) };
   }
 
   async verify(token: string): Promise<AdminJwtPayload> {
+    // The decoded claims are untrusted — type them loosely and validate.
+    let raw: { sub?: unknown; type?: unknown; email?: unknown };
     try {
-      return await this.jwt.verifyAsync<AdminJwtPayload>(token);
+      raw = await this.jwt.verifyAsync(token);
     } catch {
       throw new UnauthorizedException('Invalid or expired session');
     }
+    // Reject anything that isn't an admin token (e.g. a client-portal token
+    // signed with the same secret). Prevents cross-role privilege escalation.
+    if (raw.type !== 'admin' || typeof raw.sub !== 'string' || typeof raw.email !== 'string') {
+      throw new UnauthorizedException('Not an admin session');
+    }
+    return { sub: raw.sub, type: 'admin', email: raw.email };
   }
 }

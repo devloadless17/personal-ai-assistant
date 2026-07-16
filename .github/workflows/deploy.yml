@@ -122,8 +122,7 @@ jobs:
         env:
           REQUIRED: |
             DOCKER_USERNAME DOCKER_SECRET VPS_HOST VPS_USER VPS_SSH_KEY_B64 DOMAIN
-            DATABASE_URL ENCRYPTION_KEY JWT_SECRET ANTHROPIC_API_KEY
-            ADMIN_EMAIL ADMIN_PASSWORD
+            ENCRYPTION_KEY JWT_SECRET ANTHROPIC_API_KEY
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           missing=""
@@ -176,14 +175,15 @@ jobs:
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOMAIN: ${{ secrets.DOMAIN }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          # Default dashboard login if the secrets aren't set (override anytime
+          # by adding ADMIN_EMAIL / ADMIN_PASSWORD secrets + redeploying).
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || 'ali@loadless.ai' }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'loadless' }}
           ADMIN_ALERT_BOT_TOKEN: ${{ secrets.ADMIN_ALERT_BOT_TOKEN }}
           ADMIN_ALERT_CHAT_ID: ${{ secrets.ADMIN_ALERT_CHAT_ID }}
         run: |
@@ -197,7 +197,6 @@ jobs:
           sed -i "s|^IMAGE_TAG=latest|IMAGE_TAG=$GITHUB_SHA|" .env.rendered
           sed -i "s|__DOCKER_USERNAME__|$(esc "$DOCKER_USERNAME")|g" .env.rendered
           sed -i "s|__DOMAIN__|$(esc "$DOMAIN")|g" .env.rendered
-          sed -i "s|__DATABASE_URL__|$(esc "$DATABASE_URL")|g" .env.rendered
           sed -i "s|__ENCRYPTION_KEY__|$(esc "$ENCRYPTION_KEY")|g" .env.rendered
           sed -i "s|__JWT_SECRET__|$(esc "$JWT_SECRET")|g" .env.rendered
           sed -i "s|__ANTHROPIC_API_KEY__|$(esc "$ANTHROPIC_API_KEY")|g" .env.rendered

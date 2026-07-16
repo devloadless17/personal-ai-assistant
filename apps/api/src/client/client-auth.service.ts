@@ -62,13 +62,16 @@ export class ClientAuthService {
   }
 
   async verify(token: string): Promise<ClientJwtPayload> {
-    let payload: ClientJwtPayload;
+    // The decoded claims are untrusted — type them loosely and validate.
+    let raw: { sub?: unknown; type?: unknown; email?: unknown };
     try {
-      payload = await this.jwt.verifyAsync<ClientJwtPayload>(token);
+      raw = await this.jwt.verifyAsync(token);
     } catch {
       throw new UnauthorizedException('Invalid or expired session');
     }
-    if (payload.type !== 'client') throw new UnauthorizedException('Not a client session');
-    return payload;
+    if (raw.type !== 'client' || typeof raw.sub !== 'string' || typeof raw.email !== 'string') {
+      throw new UnauthorizedException('Not a client session');
+    }
+    return { sub: raw.sub, type: 'client', email: raw.email };
   }
 }
