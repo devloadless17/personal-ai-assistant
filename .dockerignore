@@ -1,0 +1,23 @@
+# Keep the Docker build context minimal and hermetic.
+# CRITICAL: host node_modules must never overlay the image's fresh install,
+# and .env secrets must never enter the build context.
+
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/*.tsbuildinfo
+
+.git
+.env
+.env.*
+!.env.example
+
+e2e/playwright-report
+e2e/test-results
+e2e/blob-report
+
+*.log
+.DS_Store
+.idea
+.vscode

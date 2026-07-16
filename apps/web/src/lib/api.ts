@@ -1,16 +1,16 @@
 import type { HealthReport } from "@assistant/shared";
 
 /**
- * Base URL of the NestJS API.
- * Server components read API_URL (docker-internal); the browser would use
- * NEXT_PUBLIC_API_URL. Defaults cover local dev.
+ * Base URL of the NestJS API, for SERVER-SIDE fetches only (server
+ * components / route handlers). In Docker this is the internal network URL
+ * (http://api:3001); locally it defaults to the dev API port.
+ *
+ * Browser-side calls (Milestone 6+) must NOT use this — they go to the
+ * same-origin `/api/*` path that Caddy routes to the API, so no runtime
+ * env var is needed in the client bundle.
  */
 export function apiBaseUrl(): string {
-  return (
-    process.env.API_URL ??
-    process.env.NEXT_PUBLIC_API_URL ??
-    "http://localhost:3001"
-  );
+  return process.env.API_URL ?? "http://localhost:3001";
 }
 
 /** Deep health check against the API (never cached — always the truth). */

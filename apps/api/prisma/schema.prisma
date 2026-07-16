@@ -121,16 +121,26 @@ model Message {
   direction MessageDirection
   content   String
 
+  /// Telegram update_id — dedup key: Telegram redelivers webhooks on timeout,
+  /// and the unique constraint makes double-processing impossible.
+  telegramUpdateId BigInt?
+
   createdAt DateTime @default(now())
 
-  // Context assembly: last N by (clientId, createdAt DESC) LIMIT N
-  @@index([clientId, createdAt])
+  // Context assembly: last N by (clientId, createdAt DESC) LIMIT N;
+  // id as tiebreaker so same-millisecond bursts paginate correctly
+  @@index([clientId, createdAt, id])
+  @@unique([clientId, telegramUpdateId])
 }
 
 model AuditLog {
   id       String @id @default(cuid())
   clientId String
-  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  /// Restrict, NOT Cascade: the audit trail is the system's evidence record —
+  /// deleting a client must never silently destroy it. Clients are disabled
+  /// (status) rather than deleted; a hard delete requires explicit,
+  /// deliberate handling of the audit history first.
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
 
   toolName String
   input    Json
@@ -139,8 +149,9 @@ model AuditLog {
 
   createdAt DateTime @default(now())
 
-  // Dashboard: cursor-paginated per-client log, filterable by tool/success
-  @@index([clientId, createdAt])
+  // Dashboard: cursor-paginated per-client log, filterable by tool/success;
+  // id as tiebreaker so same-millisecond bursts paginate correctly
+  @@index([clientId, createdAt, id])
   @@index([clientId, toolName, createdAt])
 }
 

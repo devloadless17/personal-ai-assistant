@@ -71,7 +71,7 @@ http://localhost:3000 shows “API & database up”.
 | `pnpm build` | Build all packages |
 | `pnpm typecheck` / `pnpm lint` | Strict TS + ESLint across the repo |
 | `pnpm test` | Jest unit tests |
-| `pnpm e2e` | Playwright end-to-end suite (stack must be running) |
+| `pnpm e2e` | Playwright end-to-end suite (stack must be running; first run: `pnpm --filter @assistant/e2e exec playwright install chromium`) |
 | `pnpm db:migrate` | Apply Prisma migrations (`migrate deploy`) |
 | `pnpm db:studio` | Prisma Studio DB browser |
 
@@ -82,7 +82,12 @@ The whole stack ships as Docker Compose behind Caddy with automatic HTTPS. Postg
 
 ```bash
 # On the VPS, with DNS for $DOMAIN pointing at the machine:
-cp .env.example .env      # fill in real values; set DOMAIN=assistant.example.com
+cp .env.example .env
+# Set for production (exact values matter — CORS matches PUBLIC_WEB_URL as a string):
+#   DOMAIN=assistant.example.com
+#   PUBLIC_API_URL=https://assistant.example.com/api    (no trailing slash)
+#   PUBLIC_WEB_URL=https://assistant.example.com        (no trailing slash)
+# ...plus DATABASE_URL, ENCRYPTION_KEY, JWT_SECRET and the milestone keys.
 cd docker
 docker compose --env-file ../.env up -d --build
 ```

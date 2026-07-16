@@ -1,11 +1,7 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+// Single source of truth for the health contract — shared with the dashboard.
+import type { HealthReport } from '@assistant/shared';
 import { PrismaService } from '../prisma/prisma.service';
-
-interface HealthReport {
-  status: 'ok';
-  db: 'up';
-  timestamp: string;
-}
 
 @Controller('health')
 export class HealthController {

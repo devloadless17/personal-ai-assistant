@@ -63,6 +63,7 @@ CREATE TABLE "Message" (
     "clientId" TEXT NOT NULL,
     "direction" "MessageDirection" NOT NULL,
     "content" TEXT NOT NULL,
+    "telegramUpdateId" BIGINT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
@@ -108,10 +109,13 @@ CREATE INDEX "Task_clientId_createdAt_idx" ON "Task"("clientId", "createdAt");
 CREATE UNIQUE INDEX "Memory_clientId_key_key" ON "Memory"("clientId", "key");
 
 -- CreateIndex
-CREATE INDEX "Message_clientId_createdAt_idx" ON "Message"("clientId", "createdAt");
+CREATE INDEX "Message_clientId_createdAt_id_idx" ON "Message"("clientId", "createdAt", "id");
 
 -- CreateIndex
-CREATE INDEX "AuditLog_clientId_createdAt_idx" ON "AuditLog"("clientId", "createdAt");
+CREATE UNIQUE INDEX "Message_clientId_telegramUpdateId_key" ON "Message"("clientId", "telegramUpdateId");
+
+-- CreateIndex
+CREATE INDEX "AuditLog_clientId_createdAt_id_idx" ON "AuditLog"("clientId", "createdAt", "id");
 
 -- CreateIndex
 CREATE INDEX "AuditLog_clientId_toolName_createdAt_idx" ON "AuditLog"("clientId", "toolName", "createdAt");
@@ -129,4 +133,4 @@ ALTER TABLE "Memory" ADD CONSTRAINT "Memory_clientId_fkey" FOREIGN KEY ("clientI
 ALTER TABLE "Message" ADD CONSTRAINT "Message_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "Client"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "Client"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "Client"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
