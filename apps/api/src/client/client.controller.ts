@@ -18,6 +18,7 @@ import type { Response } from 'express';
 import { z } from 'zod';
 import type { ClientMe, PortalEvent, PortalMemory, PortalTask } from '@assistant/shared';
 import { GoogleCalendarGateway } from '../integrations/google/google-calendar.gateway';
+import { describeRecurrence } from '../tools/tasks.tools';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenancyService } from '../tenancy/tenancy.service';
@@ -145,6 +146,7 @@ export class ClientController {
       dueAt: t.dueAt?.toISOString() ?? null,
       reminderAt: t.reminderAt?.toISOString() ?? null,
       notes: t.notes,
+      recurrence: t.recurrenceFreq ? describeRecurrence(t) : null,
     }));
   }
 

@@ -5,8 +5,8 @@ import { formatInTz, isoDateTime } from './time';
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** How the model specifies recurrence; translated to the DB recurrence fields. */
-const repeatSchema = z.object({
+/** Base recurrence shape the model provides. */
+export const repeatBaseSchema = z.object({
   freq: z.enum(['daily', 'weekly', 'monthly']),
   interval: z.number().int().min(1).max(60).optional().describe('Every N periods (default 1).'),
   weekdays: z
@@ -16,9 +16,37 @@ const repeatSchema = z.object({
   until: isoDateTime.optional().describe('Optional end date; the series stops after this.'),
 });
 
-type RepeatInput = z.infer<typeof repeatSchema>;
+export type RepeatInput = z.infer<typeof repeatBaseSchema>;
 
-function repeatToFields(repeat: RepeatInput): {
+/** Task/reminder recurrence: our own cron can't express "every other Friday"
+ * (interval>1 WITH weekdays), so reject it rather than silently over-firing.
+ * (Calendar events use Google RRULE, which DOES support it — see calendar.tools.) */
+const repeatSchema = repeatBaseSchema.refine(
+  (r) => !(r.freq === 'weekly' && (r.interval ?? 1) > 1 && (r.weekdays?.length ?? 0) > 0),
+  {
+    message:
+      'weekly with BOTH an interval>1 and specific weekdays is not supported for reminders; use weekdays alone (e.g. every Friday) or an interval alone (e.g. every 2 weeks)',
+  },
+);
+
+const RRULE_DAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+
+/** Convert a repeat spec to a Google Calendar RRULE (native recurring event). */
+export function repeatToRRule(repeat: RepeatInput): string[] {
+  const parts = [`FREQ=${repeat.freq.toUpperCase()}`];
+  const interval = repeat.interval ?? 1;
+  if (interval > 1) parts.push(`INTERVAL=${interval}`);
+  if (repeat.freq === 'weekly' && repeat.weekdays && repeat.weekdays.length > 0) {
+    parts.push(`BYDAY=${repeat.weekdays.map((w) => RRULE_DAYS[w]).join(',')}`);
+  }
+  if (repeat.until) {
+    // Google UNTIL wants UTC basic format: YYYYMMDDTHHMMSSZ.
+    parts.push(`UNTIL=${repeat.until.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`);
+  }
+  return [`RRULE:${parts.join(';')}`];
+}
+
+export function repeatToFields(repeat: RepeatInput): {
   recurrenceFreq: RecurrenceFreq;
   recurrenceInterval: number;
   recurrenceWeekdays: number[];
@@ -32,7 +60,7 @@ function repeatToFields(repeat: RepeatInput): {
   };
 }
 
-function describeRecurrence(t: Task): string {
+export function describeRecurrence(t: Task): string {
   if (!t.recurrenceFreq) return '';
   const n = t.recurrenceInterval ?? 1;
   const every = n > 1 ? `every ${n} ` : 'every ';
@@ -171,7 +199,8 @@ export const createTask = defineTool({
       dueAt,
       reminderAt,
       notes: input.notes ?? null,
-      ...(input.repeat ? repeatToFields(input.repeat) : {}),
+      // Anchor the series on its first occurrence so monthly day-of-month is stable.
+      ...(input.repeat ? { ...repeatToFields(input.repeat), recurrenceAnchor: reminderAt } : {}),
     });
     return `Created: ${renderTask(task, ctx.client.timezone)}`;
   },
@@ -261,13 +290,22 @@ export const updateTask = defineTool({
         : undefined;
 
     // Recurrence: an object sets/replaces it; `null` stops the series; `undefined`
-    // (omitted) leaves it as-is.
+    // (omitted) leaves it as-is. Setting one anchors on the resulting reminder time.
+    if (repeat && resultingReminder === null) {
+      return 'ERROR: a recurring reminder needs a time — set reminder_at (or due_at) too. Nothing was changed.';
+    }
     const recurrencePatch =
       repeat === undefined
         ? {}
         : repeat === null
-          ? { recurrenceFreq: null, recurrenceInterval: 1, recurrenceWeekdays: [], recurrenceUntil: null }
-          : repeatToFields(repeat);
+          ? {
+              recurrenceFreq: null,
+              recurrenceInterval: 1,
+              recurrenceWeekdays: [],
+              recurrenceUntil: null,
+              recurrenceAnchor: null,
+            }
+          : { ...repeatToFields(repeat), recurrenceAnchor: resultingReminder };
 
     const task = await ctx.repo.updateTask(task_id, {
       ...rest,

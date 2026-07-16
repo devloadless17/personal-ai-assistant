@@ -52,15 +52,26 @@ export class GoogleCalendarGateway implements CalendarGateway {
     end: Date;
     description?: string;
     location?: string;
+    attendees?: string[];
+    sendInvites?: boolean;
+    recurrence?: string[];
   }): Promise<CalendarEvent> {
     const res = await this.calendar.events.insert({
       calendarId: 'primary',
+      // sendUpdates 'all' emails the guests; 'none' adds them silently.
+      sendUpdates: params.sendInvites ? 'all' : 'none',
       requestBody: {
         summary: params.title,
         description: params.description,
         location: params.location,
         start: { dateTime: params.start.toISOString(), timeZone: this.timezone },
         end: { dateTime: params.end.toISOString(), timeZone: this.timezone },
+        ...(params.attendees && params.attendees.length > 0
+          ? { attendees: params.attendees.map((email) => ({ email })) }
+          : {}),
+        ...(params.recurrence && params.recurrence.length > 0
+          ? { recurrence: params.recurrence }
+          : {}),
       },
     });
     return this.toEvent(res.data);
@@ -74,6 +85,8 @@ export class GoogleCalendarGateway implements CalendarGateway {
       end: Date;
       description: string;
       location: string;
+      attendees: string[];
+      sendInvites: boolean;
     }>,
   ): Promise<CalendarEvent> {
     // PATCH semantics: only the provided fields change.
@@ -83,9 +96,13 @@ export class GoogleCalendarGateway implements CalendarGateway {
     if (params.location !== undefined) body.location = params.location;
     if (params.start) body.start = { dateTime: params.start.toISOString(), timeZone: this.timezone };
     if (params.end) body.end = { dateTime: params.end.toISOString(), timeZone: this.timezone };
+    if (params.attendees !== undefined) {
+      body.attendees = params.attendees.map((email) => ({ email }));
+    }
     const res = await this.calendar.events.patch({
       calendarId: 'primary',
       eventId,
+      sendUpdates: params.sendInvites ? 'all' : 'none',
       requestBody: body,
     });
     return this.toEvent(res.data);
@@ -182,6 +199,9 @@ export class GoogleCalendarGateway implements CalendarGateway {
       GoogleCalendarGateway.logger.warn(`Malformed event from Google: ${JSON.stringify(e.id)}`);
       throw new Error('Google returned a malformed event.');
     }
+    const attendees = (e.attendees ?? [])
+      .map((a) => a.email)
+      .filter((email): email is string => Boolean(email));
     return {
       id: e.id,
       title: e.summary ?? '(untitled)',
@@ -190,6 +210,9 @@ export class GoogleCalendarGateway implements CalendarGateway {
       allDay,
       description: e.description ?? undefined,
       location: e.location ?? undefined,
+      attendees: attendees.length > 0 ? attendees : undefined,
+      // A series master has `recurrence`; an expanded instance has `recurringEventId`.
+      recurring: Boolean(e.recurringEventId ?? e.recurrence),
     };
   }
 }

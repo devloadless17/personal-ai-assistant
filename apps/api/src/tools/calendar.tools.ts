@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from './tool.types';
 import type { CalendarEvent, ToolContext } from './tool.types';
+import { repeatBaseSchema, repeatToFields, repeatToRRule } from './tasks.tools';
 import { formatInTz, isoDateTime } from './time';
 
 const NOT_CONNECTED =
@@ -11,7 +12,9 @@ function renderEvent(e: CalendarEvent, tz: string): string {
     ? `all day ${formatInTz(e.start, tz).split(',').slice(0, 2).join(',')}`
     : `${formatInTz(e.start, tz)} → ${formatInTz(e.end, tz)}`;
   const bits = [`[id:${e.id}] ${e.title} — ${when}`];
+  if (e.recurring) bits.push('(recurring)');
   if (e.location) bits.push(`at ${e.location}`);
+  if (e.attendees && e.attendees.length > 0) bits.push(`with ${e.attendees.join(', ')}`);
   if (e.description) bits.push(`(${e.description})`);
   return bits.join(' ');
 }
@@ -114,13 +117,29 @@ export const findFreeTime = defineTool({
 export const createCalendarEvent = defineTool({
   name: 'create_calendar_event',
   description:
-    "Create an event on the client's Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms). Set reminder_minutes_before to also send the client a Telegram reminder before the meeting — use their default lead time unless they say otherwise.",
+    "Create an event on the client's Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms). Set reminder_minutes_before to also send the client a Telegram reminder before the meeting — use their default lead time unless they say otherwise. Add attendees to include other people; set send_invites ONLY when the client explicitly asks to invite/notify them.",
   schema: z.object({
     title: z.string().min(1).max(300),
     start: isoDateTime.describe('Event start (ISO 8601).'),
     end: isoDateTime.describe('Event end (ISO 8601). Must be after start.'),
     description: z.string().max(2000).optional(),
     location: z.string().max(300).optional(),
+    attendees: z
+      .array(z.string().email())
+      .max(50)
+      .optional()
+      .describe('Guest email addresses to add to the event (only ones the client explicitly named).'),
+    send_invites: z
+      .boolean()
+      .optional()
+      .describe(
+        'Email the attendees an invite. Default false (added silently). Set true ONLY when the client explicitly says to invite/notify them ("and invite them").',
+      ),
+    repeat: repeatBaseSchema
+      .optional()
+      .describe(
+        'Make it a RECURRING meeting ("every Saturday", "every weekday", "monthly") — creates a native repeating Google Calendar event.',
+      ),
     reminder_minutes_before: z
       .number()
       .int()
@@ -138,6 +157,8 @@ export const createCalendarEvent = defineTool({
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
     if (input.end <= input.start) return 'ERROR: end must be after start. Nothing was created.';
+    // Conflict-check only the FIRST occurrence (recurring series can't be fully
+    // pre-checked); still catches the common "this slot is taken" case.
     if (!input.allow_conflict) {
       const conflicts = await conflictWarning(ctx, input.start, input.end);
       if (conflicts) {
@@ -150,6 +171,9 @@ export const createCalendarEvent = defineTool({
       end: input.end,
       description: input.description,
       location: input.location,
+      attendees: input.attendees,
+      sendInvites: input.send_invites,
+      recurrence: input.repeat ? repeatToRRule(input.repeat) : undefined,
     });
 
     let reminderNote = '';
@@ -159,14 +183,24 @@ export const createCalendarEvent = defineTool({
       // polled). It's linked to the event id so it moves/cancels with it.
       const reminderAt = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
       if (reminderAt.getTime() > ctx.now.getTime()) {
+        // A recurring meeting gets a RECURRING companion reminder so the client
+        // is pinged before EACH occurrence — unless the pattern is one our DB
+        // cron can't represent (weekly interval>1 with weekdays), where we fall
+        // back to a one-shot ping for the first occurrence.
+        const rep = input.repeat;
+        const companionRecurrence =
+          rep && !(rep.freq === 'weekly' && (rep.interval ?? 1) > 1 && (rep.weekdays?.length ?? 0) > 0)
+            ? { ...repeatToFields(rep), recurrenceAnchor: reminderAt }
+            : {};
         await ctx.repo.createTask({
           title: `Reminder: ${input.title}`,
           type: 'reminder',
           reminderAt,
           sourceEventId: event.id,
           reminderLeadMinutes: input.reminder_minutes_before,
+          ...companionRecurrence,
         });
-        reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before.`;
+        reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before${input.repeat ? ' each time' : ''}.`;
       } else {
         // The lead time is already in the past (e.g. booking a meeting that
         // starts in under `reminder_minutes_before`). Never claim a reminder we
@@ -174,7 +208,13 @@ export const createCalendarEvent = defineTool({
         reminderNote = ` (The meeting is under ${input.reminder_minutes_before} min away, so I didn't set a separate reminder.)`;
       }
     }
-    return `Created on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
+    let inviteNote = '';
+    if (input.attendees && input.attendees.length > 0) {
+      inviteNote = input.send_invites
+        ? ` Invites emailed to ${input.attendees.join(', ')}.`
+        : ` ${input.attendees.join(', ')} added as guest(s) — no invite emailed (say "invite them" to notify).`;
+    }
+    return `Created on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}${inviteNote}`;
   },
 });
 
@@ -189,6 +229,15 @@ export const updateCalendarEvent = defineTool({
     end: isoDateTime.optional().describe('New end (ISO 8601).'),
     description: z.string().max(2000).optional(),
     location: z.string().max(300).optional(),
+    attendees: z
+      .array(z.string().email())
+      .max(50)
+      .optional()
+      .describe('Replace the full guest list with these emails (only ones the client named).'),
+    send_invites: z
+      .boolean()
+      .optional()
+      .describe('Email attendees about the change. Default false; true ONLY when the client says to invite/notify them.'),
     reminder_minutes_before: z
       .number()
       .int()
@@ -200,7 +249,8 @@ export const updateCalendarEvent = defineTool({
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
-    const { event_id, allow_conflict, reminder_minutes_before, start, end, ...rest } = input;
+    const { event_id, allow_conflict, reminder_minutes_before, start, end, attendees, send_invites, ...rest } =
+      input;
 
     // A time change may set only start OR only end. To validate the ordering
     // and re-check conflicts we need BOTH sides, so fetch the current event and
@@ -226,7 +276,13 @@ export const updateCalendarEvent = defineTool({
         return `CONFLICT — nothing was changed. The new time overlaps:\n${conflicts}\nAsk the client whether to pick another time or move anyway (then retry with allow_conflict=true).`;
       }
     }
-    const event = await ctx.calendar.updateEvent(event_id, { ...rest, start, end });
+    const event = await ctx.calendar.updateEvent(event_id, {
+      ...rest,
+      start,
+      end,
+      ...(attendees !== undefined ? { attendees } : {}),
+      ...(send_invites !== undefined ? { sendInvites: send_invites } : {}),
+    });
 
     // Keep the companion reminder correct: explicit lead wins; otherwise a
     // moved event preserves its existing lead; a title-only edit leaves it be.

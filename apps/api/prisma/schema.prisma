@@ -140,6 +140,10 @@ model Task {
   recurrenceWeekdays Int[]           @default([])
   /// Optional end of the series (inclusive-ish); past this, it stops.
   recurrenceUntil    DateTime?
+  /// The series' ORIGINAL first occurrence — the immutable anchor. Monthly
+  /// recurrence computes each occurrence's day-of-month from this so a "31st"
+  /// reminder recovers to the 31st after a short month, never drifting to the 28th.
+  recurrenceAnchor   DateTime?
 
   notes String?
 
@@ -169,6 +173,8 @@ model Memory {
 
   // One value per key per client; upserts are the write path
   @@unique([clientId, key])
+  // Profile load orders by updatedAt desc — keep the sort index-satisfied
+  @@index([clientId, updatedAt])
 }
 
 enum MemoryCategory {
@@ -189,6 +195,8 @@ model CalendarConflictAlert {
 
   @@unique([clientId, conflictKey])
   @@index([clientId, alertedAt])
+  // Supports the global TTL cleanup (deleteMany where alertedAt < cutoff)
+  @@index([alertedAt])
 }
 
 model Message {

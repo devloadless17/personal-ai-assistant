@@ -46,8 +46,12 @@ export class ReminderJob implements OnApplicationBootstrap {
   /** Lease window: a claimed-but-unconfirmed reminder is re-claimable after
    * this long (covers a crash between claim and send). */
   private static readonly LEASE_MS = 3 * 60_000;
-  /** Reminders delivered in parallel per tick. */
-  private static readonly CONCURRENCY = 6;
+  /** Reminders delivered in parallel per batch. */
+  private static readonly CONCURRENCY = 10;
+  /** Rows claimed per batch; the tick drains multiple batches until empty. */
+  private static readonly BATCH = 500;
+  /** Wall-clock budget for one tick's drain; leftovers roll to the next tick. */
+  private static readonly DRAIN_BUDGET_MS = 45_000;
   /** Prevents a long tick from overlapping the next — avoids doubled load and
    * heartbeat clobber. */
   private running = false;
@@ -77,24 +81,34 @@ export class ReminderJob implements OnApplicationBootstrap {
 
   async run(now: Date): Promise<void> {
     const leaseCutoff = new Date(now.getTime() - ReminderJob.LEASE_MS);
-    const due = await this.prisma.task.findMany({
-      where: {
-        reminderSent: false,
-        reminderAt: { lte: now },
-        status: 'open',
-        client: { status: 'active', telegramChatId: { not: null } },
-        // Skip reminders another live tick just claimed; re-claim stale leases.
-        OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
-      },
-      include: { client: true },
-      take: 100,
-      orderBy: { reminderAt: 'asc' },
-    });
-    this.lastDueCount = due.length;
+    const deadline = now.getTime() + ReminderJob.DRAIN_BUDGET_MS;
+    this.lastDueCount = 0;
     this.lastSentCount = 0;
-    // Bounded concurrency: deliver several due reminders in parallel (each
-    // independently leased) instead of serially, so a batch doesn't drift late.
-    await mapWithConcurrency(due, ReminderJob.CONCURRENCY, (task) => this.deliver(task, now, leaseCutoff));
+    // DRAIN loop: keep claiming batches until nothing is due (or the wall-clock
+    // budget is hit — leftovers roll to the next tick). Prevents a burst of
+    // reminders that all come due at the same minute from shipping late. Each
+    // batch's rows are independently leased, so larger batches stay safe.
+    for (;;) {
+      const due = await this.prisma.task.findMany({
+        where: {
+          reminderSent: false,
+          reminderAt: { lte: now },
+          status: 'open',
+          client: { status: 'active', telegramChatId: { not: null } },
+          // Skip reminders another live tick just claimed; re-claim stale leases.
+          OR: [{ reminderClaimedAt: null }, { reminderClaimedAt: { lt: leaseCutoff } }],
+        },
+        include: { client: true },
+        take: ReminderJob.BATCH,
+        orderBy: { reminderAt: 'asc' },
+      });
+      if (due.length === 0) break;
+      this.lastDueCount += due.length;
+      await mapWithConcurrency(due, ReminderJob.CONCURRENCY, (task) =>
+        this.deliver(task, now, leaseCutoff),
+      );
+      if (due.length < ReminderJob.BATCH || Date.now() >= deadline) break;
+    }
   }
 
   private async deliver(
@@ -132,7 +146,7 @@ export class ReminderJob implements OnApplicationBootstrap {
       );
       // Delivery CONFIRMED — recurring reminders roll forward to their next
       // occurrence; one-shots are marked permanently sent.
-      await this.advanceOrComplete(task, client.timezone);
+      await this.advanceOrComplete(task, client.timezone, now);
       this.lastSentCount += 1;
       this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
     } catch (err) {
@@ -159,16 +173,32 @@ export class ReminderJob implements OnApplicationBootstrap {
    * Any failure to compute the next occurrence falls back to marking sent, so a
    * row can never get stuck re-sending.
    */
-  private async advanceOrComplete(task: Task, timezone: string): Promise<void> {
+  private async advanceOrComplete(task: Task, timezone: string, now: Date): Promise<void> {
     try {
       if (task.recurrenceFreq && task.reminderAt) {
-        const next = nextOccurrence(
+        // Advance to the FIRST occurrence strictly after now — so an outage that
+        // skipped many occurrences fires ONE ping (this send) and re-arms for the
+        // future, not a burst of stale pings. Bounded by a hard cap.
+        let next = nextOccurrence(
           task.reminderAt,
           task.recurrenceFreq,
           task.recurrenceInterval ?? 1,
           task.recurrenceWeekdays,
           timezone,
+          task.recurrenceAnchor,
         );
+        for (let i = 0; i < 1000 && next.getTime() <= now.getTime(); i++) {
+          const after = nextOccurrence(
+            next,
+            task.recurrenceFreq,
+            task.recurrenceInterval ?? 1,
+            task.recurrenceWeekdays,
+            timezone,
+            task.recurrenceAnchor,
+          );
+          if (after.getTime() <= next.getTime()) break; // safety: no progress
+          next = after;
+        }
         const beyondUntil =
           task.recurrenceUntil != null && next.getTime() > task.recurrenceUntil.getTime();
         if (!beyondUntil && next.getTime() > task.reminderAt.getTime()) {
@@ -190,9 +220,14 @@ export class ReminderJob implements OnApplicationBootstrap {
         `Failed to compute next occurrence for recurring task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    // One-shot fired, or a recurring SERIES that has ended. For a finished
+    // recurring reminder also mark it done + clear recurrence so it doesn't
+    // linger as a perpetual open item in task lists.
     await this.prisma.task.updateMany({
       where: { id: task.id },
-      data: { reminderSent: true },
+      data: task.recurrenceFreq
+        ? { reminderSent: true, status: 'done', recurrenceFreq: null }
+        : { reminderSent: true },
     });
   }
 }

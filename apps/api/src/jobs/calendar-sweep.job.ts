@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import type { Client } from '@prisma/client';
@@ -16,6 +16,19 @@ import { AdminAlertService } from './admin-alert.service';
 const HORIZON_MS = 48 * 60 * 60_000;
 /** How many clients to sweep in parallel (each does a live Google read). */
 const CONCURRENCY = 6;
+/** Shard clients across ticks: with a 10-min cron, each client is swept once
+ * per SHARDS ticks (= hourly at 6), keeping steady-state Google load ~1/6. */
+const SHARDS = 6;
+/** Delete alert de-dup rows older than this (must exceed HORIZON so a live
+ * conflict never loses its de-dup row and re-alerts). */
+const ALERT_RETENTION_MS = 30 * 24 * 60 * 60_000;
+
+/** Stable non-negative hash of a client id, for tick sharding. */
+function hashId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
 
 /**
  * Every ~10 min: read each Google-connected client's live calendar for the near
@@ -28,7 +41,7 @@ const CONCURRENCY = 6;
  * tick. Reuses the "live reads, no mirror" model — no Google watch channels.
  */
 @Injectable()
-export class CalendarSweepJob {
+export class CalendarSweepJob implements OnApplicationBootstrap {
   private readonly logger = new Logger(CalendarSweepJob.name);
 
   // Heartbeat/observability — surfaced by GET /admin/diagnostics.
@@ -45,6 +58,12 @@ export class CalendarSweepJob {
     private readonly telegram: TelegramService,
     private readonly alerts: AdminAlertService,
   ) {}
+
+  /** Run once on boot so double-bookings are surfaced right after a deploy and
+   * the job is immediately observable — de-dup makes the re-scan safe. */
+  async onApplicationBootstrap(): Promise<void> {
+    await this.tick();
+  }
 
   @Cron('*/10 * * * *')
   async tick(): Promise<void> {
@@ -70,6 +89,12 @@ export class CalendarSweepJob {
   }
 
   async run(now: Date): Promise<void> {
+    // Prune stale de-dup rows (older than retention) so the table can't grow
+    // unbounded; index-backed by (alertedAt).
+    await this.prisma.calendarConflictAlert.deleteMany({
+      where: { alertedAt: { lt: new Date(now.getTime() - ALERT_RETENTION_MS) } },
+    });
+
     const clients = await this.prisma.client.findMany({
       where: {
         status: 'active',
@@ -77,8 +102,13 @@ export class CalendarSweepJob {
         googleOAuthEnc: { not: null },
       },
     });
+    // Shard across ticks: each tick sweeps only ~1/SHARDS of clients (every
+    // client swept once per SHARDS ticks), so a large client base doesn't do a
+    // full-base live-Google scan every 10 min.
+    const slot = this.ticks % SHARDS;
+    const mine = clients.filter((c) => hashId(c.id) % SHARDS === slot);
     this.lastAlertCount = 0;
-    await mapWithConcurrency(clients, CONCURRENCY, (client) => this.sweepClient(client, now));
+    await mapWithConcurrency(mine, CONCURRENCY, (client) => this.sweepClient(client, now));
   }
 
   private async sweepClient(client: Client, now: Date): Promise<void> {

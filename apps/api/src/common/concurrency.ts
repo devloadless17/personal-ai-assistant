@@ -14,9 +14,10 @@ export async function mapWithConcurrency<T, R>(
   const worker = async (): Promise<void> => {
     for (;;) {
       const i = cursor++;
-      const item = items[i];
-      if (i >= items.length || item === undefined) return;
-      results[i] = await fn(item, i);
+      // Test the INDEX, not the value — a legitimately `undefined` element must
+      // not be mistaken for end-of-list and silently skipped.
+      if (i >= items.length) return;
+      results[i] = await fn(items[i] as T, i);
     }
   };
   await Promise.all(Array.from({ length: workerCount }, () => worker()));

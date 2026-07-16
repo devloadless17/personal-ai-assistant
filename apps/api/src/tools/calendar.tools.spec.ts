@@ -21,11 +21,15 @@ function makeGateway(
     getEvent: jest
       .fn()
       .mockImplementation((id: string) => Promise.resolve(existing.find((e) => e.id === id) ?? null)),
-    createEvent: jest.fn().mockImplementation((p: { title: string; start: Date; end: Date }) => {
-      const e: CalendarEvent = { id: `ev-${created.length + 1}`, allDay: false, ...p };
-      created.push(e);
-      return Promise.resolve(e);
-    }),
+    createEvent: jest
+      .fn()
+      .mockImplementation(
+        (p: { title: string; start: Date; end: Date; attendees?: string[]; sendInvites?: boolean }) => {
+          const e: CalendarEvent = { id: `ev-${created.length + 1}`, allDay: false, ...p };
+          created.push(e);
+          return Promise.resolve(e);
+        },
+      ),
     updateEvent: jest
       .fn()
       .mockImplementation((id: string, p: Partial<CalendarEvent>) =>
@@ -201,6 +205,68 @@ describe('calendar tools — conflict gating & honesty', () => {
       ctxWith(gw),
     );
     expect(res).toContain('ERROR');
+  });
+
+  it('adds named guests SILENTLY by default (no invite email)', async () => {
+    const gw = makeGateway([]);
+    const result = await createCalendarEvent.execute(
+      {
+        title: 'Sync',
+        start: new Date('2026-07-18T10:00:00Z'),
+        end: new Date('2026-07-18T11:00:00Z'),
+        attendees: ['sara@example.com'],
+      },
+      ctxWith(gw),
+    );
+    expect(gw.created[0]?.attendees).toEqual(['sara@example.com']);
+    expect((gw.created[0] as { sendInvites?: boolean }).sendInvites).toBeFalsy();
+    expect(result).toContain('no invite emailed');
+  });
+
+  it('emails invites only when send_invites is set', async () => {
+    const gw = makeGateway([]);
+    const result = await createCalendarEvent.execute(
+      {
+        title: 'Sync',
+        start: new Date('2026-07-18T10:00:00Z'),
+        end: new Date('2026-07-18T11:00:00Z'),
+        attendees: ['sara@example.com'],
+        send_invites: true,
+      },
+      ctxWith(gw),
+    );
+    expect((gw.created[0] as { sendInvites?: boolean }).sendInvites).toBe(true);
+    expect(result).toContain('Invites emailed');
+  });
+
+  it('creates a RECURRING meeting as a native Google recurring event + recurring companion reminder', async () => {
+    const gw = makeGateway([]);
+    const ctx = ctxWith(gw);
+    const created: Record<string, unknown>[] = [];
+    (ctx.repo as unknown as { createTask: jest.Mock }).createTask = jest
+      .fn()
+      .mockImplementation((d: Record<string, unknown>) => {
+        created.push(d);
+        return Promise.resolve({});
+      });
+    const result = await createCalendarEvent.execute(
+      {
+        title: 'Dev team meeting',
+        start: new Date('2026-07-18T12:00:00Z'),
+        end: new Date('2026-07-18T13:00:00Z'),
+        repeat: { freq: 'weekly', weekdays: [6] },
+        reminder_minutes_before: 15,
+      },
+      ctx,
+    );
+    // Native recurring Google event.
+    expect((gw.created[0] as { recurrence?: string[] }).recurrence).toEqual([
+      'RRULE:FREQ=WEEKLY;BYDAY=SA',
+    ]);
+    expect(result).toContain('Created on calendar');
+    // Companion reminder is itself recurring, anchored to the ping time.
+    expect(created[0]?.recurrenceFreq).toBe('WEEKLY');
+    expect(created[0]?.recurrenceWeekdays).toEqual([6]);
   });
 
   it('every calendar tool answers honestly when Google is not connected', async () => {

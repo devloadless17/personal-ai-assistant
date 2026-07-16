@@ -1,5 +1,5 @@
 import type { Client, Task } from '@prisma/client';
-import { createTask, updateTask } from './tasks.tools';
+import { createTask, repeatToRRule, updateTask } from './tasks.tools';
 import type { ToolContext } from './tool.types';
 import type { ClientScopedRepository } from '../tenancy/client-scoped-repository';
 
@@ -111,6 +111,27 @@ describe('tasks tools — reminder firing guarantee', () => {
     );
     expect(res).toContain('ERROR');
     expect(created).toHaveLength(0);
+  });
+
+  it('repeatToRRule builds correct Google RRULEs', () => {
+    expect(repeatToRRule({ freq: 'weekly', weekdays: [6] })).toEqual(['RRULE:FREQ=WEEKLY;BYDAY=SA']);
+    expect(repeatToRRule({ freq: 'weekly', interval: 2, weekdays: [5] })).toEqual([
+      'RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=FR',
+    ]);
+    expect(repeatToRRule({ freq: 'daily' })).toEqual(['RRULE:FREQ=DAILY']);
+    expect(repeatToRRule({ freq: 'weekly', weekdays: [1, 2, 3, 4, 5] })).toEqual([
+      'RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR',
+    ]);
+  });
+
+  it('rejects "every other Friday" for REMINDERS (weekly interval>1 + weekdays)', () => {
+    const parsed = createTask.schema.safeParse({
+      title: 'x',
+      type: 'reminder',
+      reminder_at: '2026-07-17T14:00:00Z',
+      repeat: { freq: 'weekly', interval: 2, weekdays: [5] },
+    });
+    expect(parsed.success).toBe(false);
   });
 
   it('update_task with repeat:null stops the series', async () => {

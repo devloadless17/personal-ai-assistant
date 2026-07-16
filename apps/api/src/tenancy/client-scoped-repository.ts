@@ -84,6 +84,7 @@ export class ClientScopedRepository {
     recurrenceInterval?: number | null;
     recurrenceWeekdays?: number[];
     recurrenceUntil?: Date | null;
+    recurrenceAnchor?: Date | null;
   }): Promise<Task> {
     return this.prisma.task.create({ data: { ...data, clientId: this.clientId } });
   }
@@ -119,6 +120,7 @@ export class ClientScopedRepository {
       recurrenceInterval: number | null;
       recurrenceWeekdays: number[];
       recurrenceUntil: Date | null;
+      recurrenceAnchor: Date | null;
     }>,
   ): Promise<Task | null> {
     const { count } = await this.prisma.task.updateMany({

@@ -65,6 +65,8 @@ export interface PortalTask {
   dueAt: string | null;
   reminderAt: string | null;
   notes: string | null;
+  /** Human recurrence summary (e.g. "every Sat") when this repeats, else null. */
+  recurrence: string | null;
 }
 
 /** A calendar event shown in the client portal. */

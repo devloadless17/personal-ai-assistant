@@ -13,7 +13,12 @@ const CLIENT = {
   telegramChatId: '777',
 };
 
-function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean; recurring?: boolean }): {
+function makeJob(opts?: {
+  sendFails?: boolean;
+  claimFails?: boolean;
+  recurring?: boolean;
+  reminderAt?: Date;
+}): {
   job: ReminderJob;
   sent: string[];
   updates: { where: unknown; data: unknown }[];
@@ -30,13 +35,14 @@ function makeJob(opts?: { sendFails?: boolean; claimFails?: boolean; recurring?:
           id: 't1',
           title: 'Call the bank',
           dueAt: new Date('2026-07-16T10:00:00Z'),
-          reminderAt: new Date('2026-07-16T09:55:00Z'),
+          reminderAt: opts?.reminderAt ?? new Date('2026-07-16T09:55:00Z'),
           reminderSent: false,
           reminderClaimedAt: null,
           recurrenceFreq: opts?.recurring ? 'DAILY' : null,
           recurrenceInterval: 1,
           recurrenceWeekdays: [],
           recurrenceUntil: null,
+          recurrenceAnchor: null,
           client: CLIENT,
         },
       ]),
@@ -101,6 +107,19 @@ describe('ReminderJob — at-least-once lease/send/confirm', () => {
     expect(last.data.reminderClaimedAt).toBeNull();
     // DAILY from 2026-07-16T09:55Z (client tz UTC) → 2026-07-17T09:55Z.
     expect((last.data.reminderAt as Date).toISOString()).toBe('2026-07-17T09:55:00.000Z');
+  });
+
+  it('after downtime, a recurring reminder sends ONCE and skips to the next future occurrence', async () => {
+    // reminderAt 5 days ago, DAILY. Should send one ping and re-arm to a FUTURE time.
+    const { job, sent, updates } = makeJob({
+      recurring: true,
+      reminderAt: new Date('2026-07-11T09:55:00Z'),
+    });
+    const now = new Date('2026-07-16T10:00:00Z');
+    await job.run(now);
+    expect(sent).toHaveLength(1); // ONE ping, not five
+    const last = updates[updates.length - 1] as { data: Record<string, unknown> };
+    expect((last.data.reminderAt as Date).getTime()).toBeGreaterThan(now.getTime());
   });
 
   it('does not send when the lease is lost (a concurrent tick holds it)', async () => {

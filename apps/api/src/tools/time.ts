@@ -137,6 +137,7 @@ export function nextOccurrence(
   interval: number,
   weekdays: number[],
   timeZone: string,
+  anchor?: Date | null,
 ): Date {
   const n = Math.max(1, Math.trunc(interval) || 1);
   const iso = isoInTz(current, timeZone); // YYYY-MM-DDTHH:MM:SS±HH:MM
@@ -145,6 +146,10 @@ export function nextOccurrence(
   const m = Number(dateParts[1]);
   const d = Number(dateParts[2]);
   const timePart = iso.slice(11, 19); // HH:MM:SS (local wall-clock, preserved)
+  // For MONTHLY: the day-of-month comes from the immutable ANCHOR, not the last
+  // (possibly clamped) occurrence — so "the 31st" recovers after February
+  // instead of drifting to the 28th forever.
+  const anchorDay = anchor ? Number(isoInTz(anchor, timeZone).slice(8, 10)) : d;
   // Bare calendar holder (UTC, no DST) purely for date arithmetic.
   const cal = new Date(Date.UTC(y, m - 1, d));
 
@@ -162,7 +167,7 @@ export function nextOccurrence(
   }
   if (freq === 'MONTHLY') {
     const total = y * 12 + (m - 1) + n;
-    return build(Math.floor(total / 12), (total % 12) + 1, d);
+    return build(Math.floor(total / 12), (total % 12) + 1, anchorDay);
   }
   // WEEKLY
   if (weekdays.length === 0) {

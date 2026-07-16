@@ -140,7 +140,16 @@ export class DailyBriefJob implements OnApplicationBootstrap {
     const dayEnd = endOfTodayInTz(now, tz); // DST-exact (not a fixed +24h)
     const repo = this.tenancy.repoFor(client.id);
 
-    const lines: string[] = [`☀️ Good morning, ${client.name}! Here's your day:`];
+    // Greeting matches the LOCAL time the client scheduled their summary for —
+    // "Good morning" is wrong for a 7 PM digest.
+    const hour = this.localHour(now, tz);
+    const greeting =
+      hour < 12
+        ? '☀️ Good morning'
+        : hour < 18
+          ? '👋 Good afternoon'
+          : '🌆 Good evening';
+    const lines: string[] = [`${greeting}, ${client.name}! Here's your day:`];
 
     // Calendar — live read; failure is stated, never hidden.
     try {

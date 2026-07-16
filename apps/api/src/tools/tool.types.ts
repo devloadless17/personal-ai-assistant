@@ -29,6 +29,11 @@ export interface CalendarGateway {
     end: Date;
     description?: string;
     location?: string;
+    attendees?: string[];
+    /** true → Google emails the guests an invite; false/undefined → added silently. */
+    sendInvites?: boolean;
+    /** Google RRULE strings for a recurring event, e.g. ["RRULE:FREQ=WEEKLY;BYDAY=SA"]. */
+    recurrence?: string[];
   }): Promise<CalendarEvent>;
   updateEvent(
     eventId: string,
@@ -38,6 +43,8 @@ export interface CalendarGateway {
       end: Date;
       description: string;
       location: string;
+      attendees: string[];
+      sendInvites: boolean;
     }>,
   ): Promise<CalendarEvent>;
   deleteEvent(eventId: string): Promise<void>;
@@ -63,6 +70,9 @@ export interface CalendarEvent {
   allDay: boolean;
   description?: string;
   location?: string;
+  attendees?: string[];
+  /** True if this is an instance of (or) a recurring series. */
+  recurring?: boolean;
 }
 
 /**

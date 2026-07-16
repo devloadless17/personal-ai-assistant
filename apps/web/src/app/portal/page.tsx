@@ -126,37 +126,69 @@ export default function PortalPage() {
         </CardContent>
       </Card>
 
+      {tasks.some((t) => t.recurrence) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>🔁 Recurring</CardTitle>
+            <CardDescription>Reminders and meetings that repeat. Next occurrence shown.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-2">
+              {tasks
+                .filter((t) => t.recurrence)
+                .map((t) => (
+                  <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
+                    <span className="text-sm">
+                      {t.title}
+                      <span className="ml-2 text-xs text-muted-foreground">· {t.recurrence}</span>
+                    </span>
+                    <span className="whitespace-nowrap text-right text-xs text-muted-foreground">
+                      {t.reminderAt
+                        ? `⏰ ${formatDate(t.reminderAt, me.timezone)}`
+                        : t.dueAt
+                          ? formatDate(t.dueAt, me.timezone)
+                          : ""}
+                    </span>
+                  </li>
+                ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Your tasks</CardTitle>
           <CardDescription>Open tasks and reminders your assistant is tracking.</CardDescription>
         </CardHeader>
         <CardContent>
-          {tasks.length === 0 ? (
+          {tasks.filter((t) => !t.recurrence).length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No open tasks. Tell your assistant on Telegram to add one.
+              No one-off tasks. Tell your assistant on Telegram to add one.
             </p>
           ) : (
             <ul className="space-y-2" data-testid="task-list">
-              {tasks.map((t) => (
-                <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
-                  <span className="text-sm">{t.title}</span>
-                  <span className="text-right text-xs text-muted-foreground">
-                    <span className="block whitespace-nowrap">
-                      {t.dueAt
-                        ? formatDate(t.dueAt, me.timezone)
-                        : t.reminderAt
-                          ? `⏰ ${formatDate(t.reminderAt, me.timezone)}`
-                          : "no date"}
-                    </span>
-                    {t.dueAt && t.reminderAt && t.reminderAt !== t.dueAt && (
-                      <span className="block whitespace-nowrap text-[11px] opacity-80">
-                        ⏰ {formatDate(t.reminderAt, me.timezone)}
+              {tasks
+                .filter((t) => !t.recurrence)
+                .map((t) => (
+                  <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
+                    <span className="text-sm">{t.title}</span>
+                    <span className="text-right text-xs text-muted-foreground">
+                      <span className="block whitespace-nowrap">
+                        {t.dueAt
+                          ? formatDate(t.dueAt, me.timezone)
+                          : t.reminderAt
+                            ? `⏰ ${formatDate(t.reminderAt, me.timezone)}`
+                            : "no date"}
                       </span>
-                    )}
-                  </span>
-                </li>
-              ))}
+                      {t.dueAt && t.reminderAt && t.reminderAt !== t.dueAt && (
+                        <span className="block whitespace-nowrap text-[11px] opacity-80">
+                          ⏰ {formatDate(t.reminderAt, me.timezone)}
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
             </ul>
           )}
         </CardContent>
@@ -378,7 +410,29 @@ function formatHour(h: number): string {
 
 function formatWhen(e: PortalEvent, tz: string): string {
   if (e.allDay) return `All day · ${formatDate(e.start, tz)}`;
-  return formatDate(e.start, tz);
+  // Show start → end. Same local day → end as time only; else full date.
+  const end = sameLocalDay(e.start, e.end, tz)
+    ? formatTime(e.end, tz)
+    : formatDate(e.end, tz);
+  return `${formatDate(e.start, tz)} → ${end}`;
+}
+
+function sameLocalDay(a: string, b: string, tz: string): boolean {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return fmt.format(new Date(a)) === fmt.format(new Date(b));
+}
+
+function formatTime(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(iso));
 }
 
 function formatDate(iso: string, tz: string): string {

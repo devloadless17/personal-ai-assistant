@@ -84,4 +84,16 @@ describe('nextOccurrence — recurring reminders (client-tz, DST-safe)', () => {
     expect(localDate(r)).toBe('2026-02-28');
     expect(localHM(r)).toBe('09:30');
   });
+
+  it('MONTHLY on the 31st RECOVERS via the anchor (no permanent drift to the 28th)', () => {
+    const anchor = at('2026-01-31T09:30:00');
+    // After Feb clamps to the 28th, the NEXT occurrence must return to the 31st.
+    const mar = nextOccurrence(at('2026-02-28T09:30:00'), 'MONTHLY', 1, [], TZ, anchor);
+    expect(localDate(mar)).toBe('2026-03-31');
+    // April has 30 days → clamps to 30, then May recovers to 31 (still from anchor).
+    const apr = nextOccurrence(mar, 'MONTHLY', 1, [], TZ, anchor);
+    expect(localDate(apr)).toBe('2026-04-30');
+    const may = nextOccurrence(apr, 'MONTHLY', 1, [], TZ, anchor);
+    expect(localDate(may)).toBe('2026-05-31');
+  });
 });
