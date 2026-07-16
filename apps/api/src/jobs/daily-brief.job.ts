@@ -76,9 +76,16 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       if (localHour < client.dailyBriefHour) continue;
       if (client.lastBriefDate === localDate) continue;
 
-      // Atomic claim on (id, lastBriefDate != today).
+      // Atomic claim on (id, lastBriefDate != today). Must handle the
+      // never-sent case EXPLICITLY: in SQL `NOT (lastBriefDate = today)` is
+      // NULL (not true) when lastBriefDate IS NULL, so a `NOT: {...}` form would
+      // never match a first-ever brief and the client would be skipped forever.
+      // The OR covers both "never sent" and "sent on a previous day".
       const { count } = await this.prisma.client.updateMany({
-        where: { id: client.id, NOT: { lastBriefDate: localDate } },
+        where: {
+          id: client.id,
+          OR: [{ lastBriefDate: null }, { lastBriefDate: { not: localDate } }],
+        },
         data: { lastBriefDate: localDate },
       });
       if (count === 0) continue;
