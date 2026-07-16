@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { CryptoService } from '../crypto/crypto.service';
 import { TelegramService } from '../integrations/telegram/telegram.service';
@@ -17,8 +17,16 @@ import { AdminAlertService } from './admin-alert.service';
  * reminderAt): constant-time regardless of task history.
  */
 @Injectable()
-export class ReminderJob {
+export class ReminderJob implements OnApplicationBootstrap {
   private readonly logger = new Logger(ReminderJob.name);
+
+  // Heartbeat/observability — surfaced by GET /admin/diagnostics so we can see
+  // from the live API whether the cron is actually ticking in production.
+  lastTickAt: Date | null = null;
+  lastDueCount = 0;
+  lastSentCount = 0;
+  lastError: string | null = null;
+  ticks = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -27,11 +35,21 @@ export class ReminderJob {
     private readonly alerts: AdminAlertService,
   ) {}
 
+  /** Catch up on any overdue reminders immediately on boot (e.g. after a
+   * restart/redeploy), instead of waiting up to a minute for the first tick. */
+  async onApplicationBootstrap(): Promise<void> {
+    await this.tick();
+  }
+
   @Cron(CronExpression.EVERY_MINUTE)
   async tick(): Promise<void> {
+    this.lastTickAt = new Date();
+    this.ticks += 1;
     try {
-      await this.run(new Date());
+      await this.run(this.lastTickAt);
+      this.lastError = null;
     } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
       this.logger.error(
         `Reminder tick failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
@@ -51,6 +69,8 @@ export class ReminderJob {
       take: 100,
       orderBy: { reminderAt: 'asc' },
     });
+    this.lastDueCount = due.length;
+    this.lastSentCount = 0;
 
     for (const task of due) {
       // Atomic claim — a concurrent/duplicate run can never double-send.
@@ -74,6 +94,7 @@ export class ReminderJob {
           client.telegramChatId,
           `⏰ Reminder: ${task.title}${when}`,
         );
+        this.lastSentCount += 1;
         this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
       } catch (err) {
         // Revert the claim so the next tick retries; alert on the failure.

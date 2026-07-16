@@ -13,6 +13,7 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
+import { JobsDiagnosticsService, type JobsDiagnostics } from '../jobs/jobs-diagnostics.service';
 import { AdminAuthGuard } from './admin-auth.guard';
 import { AdminAuthService } from './admin-auth.service';
 import { AdminClientsService } from './admin-clients.service';
@@ -45,7 +46,15 @@ export class AdminController {
   constructor(
     private readonly auth: AdminAuthService,
     private readonly clients: AdminClientsService,
+    private readonly diagnostics: JobsDiagnosticsService,
   ) {}
+
+  /** Live background-job health — is the reminder cron ticking? backlog? */
+  @UseGuards(AdminAuthGuard)
+  @Get('diagnostics')
+  async getDiagnostics(): Promise<JobsDiagnostics> {
+    return this.diagnostics.get();
+  }
 
   // Brute-force wall: 5 login attempts per minute per IP.
   @Throttle({ default: { ttl: 60_000, limit: 5 } })

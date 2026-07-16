@@ -344,6 +344,74 @@ describe('AgentService — reliability invariants', () => {
     expect(reply).toBe('Added "buy milk" to your tasks.');
   });
 
+  it('two clients handled concurrently never share history, context, or audit trail', async () => {
+    // Each client has its OWN scoped repo with its OWN conversation. We run
+    // both respond() calls concurrently and prove the model for client A only
+    // ever saw A's message + wrote to A's repo, and likewise for B — there is
+    // no shared mutable context that could bleed one client's data into another.
+    const clientA: Client = { ...CLIENT, id: 'client-A', name: 'Alice' };
+    const clientB: Client = { ...CLIENT, id: 'client-B', name: 'Bob' };
+
+    const stateA: FakeRepo = { audits: [], tasks: [] };
+    const stateB: FakeRepo = { audits: [], tasks: [] };
+    const makeRepoFor = (
+      id: string,
+      state: FakeRepo,
+      message: string,
+    ): ClientScopedRepository =>
+      ({
+        clientId: id,
+        recentMessages: jest
+          .fn()
+          .mockResolvedValue([{ direction: 'inbound', content: message, createdAt: new Date() }]),
+        getMemories: jest.fn().mockResolvedValue([]),
+        writeAudit: jest.fn().mockImplementation((entry: FakeRepo['audits'][number]) => {
+          state.audits.push({ ...entry, clientId: id } as never);
+          return Promise.resolve(entry);
+        }),
+        createTask: jest.fn().mockImplementation((data: { title: string }) => {
+          const task = { id: `${id}-task`, title: data.title, status: 'open', clientId: id };
+          state.tasks.push(task);
+          return Promise.resolve({ ...task, type: 'task', dueAt: null, reminderAt: null });
+        }),
+      }) as unknown as ClientScopedRepository;
+
+    const repoA = makeRepoFor('client-A', stateA, "add task 'A-secret'");
+    const repoB = makeRepoFor('client-B', stateB, "add task 'B-secret'");
+
+    // The Anthropic double branches on which client's message it sees, so a
+    // crossed history would produce the wrong tool input and fail the asserts.
+    const createMessage = jest.fn().mockImplementation((req: { messages: Anthropic.MessageParam[] }): Promise<Anthropic.Message> => {
+      const convo = JSON.stringify(req.messages);
+      if (convo.includes('A-secret') && !convo.includes('B-secret')) {
+        if (!convo.includes('Created:')) return Promise.resolve(toolUseResponse('create_task', { title: 'A-secret' }));
+        return Promise.resolve(textResponse('Added "A-secret".'));
+      }
+      if (convo.includes('B-secret') && !convo.includes('A-secret')) {
+        if (!convo.includes('Created:')) return Promise.resolve(toolUseResponse('create_task', { title: 'B-secret' }));
+        return Promise.resolve(textResponse('Added "B-secret".'));
+      }
+      throw new Error(`CONTEXT BLEED: a single model call saw a mixed conversation: ${convo}`);
+    });
+    const anthropic = { isConfigured: true, model: 'claude-opus-4-8', createMessage } as unknown as AnthropicService;
+    const tenancy = {
+      repoFor: (id: string) => (id === 'client-A' ? repoA : repoB),
+    } as unknown as TenancyService;
+    const agent = new AgentService(anthropic, tenancy);
+
+    const [replyA, replyB] = await Promise.all([agent.respond(clientA), agent.respond(clientB)]);
+
+    // Each reply reflects ONLY that client's own task.
+    expect(replyA).toBe('Added "A-secret".');
+    expect(replyB).toBe('Added "B-secret".');
+    // Each client's task landed in its OWN repo, never the other's.
+    expect(stateA.tasks.map((t) => t.title)).toEqual(['A-secret']);
+    expect(stateB.tasks.map((t) => t.title)).toEqual(['B-secret']);
+    // Every audit row is scoped to the client that produced it.
+    expect(stateA.audits.every((a) => (a as unknown as { clientId: string }).clientId === 'client-A')).toBe(true);
+    expect(stateB.audits.every((a) => (a as unknown as { clientId: string }).clientId === 'client-B')).toBe(true);
+  });
+
   it('anthropic API failure returns an honest error, never a fake success', async () => {
     const { repo } = makeFakeRepo();
     const createMessage = jest.fn().mockRejectedValue(new Error('529 overloaded'));

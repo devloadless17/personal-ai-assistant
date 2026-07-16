@@ -4,11 +4,12 @@ import { GoogleModule } from '../integrations/google/google.module';
 import { TelegramModule } from '../integrations/telegram/telegram.module';
 import { AdminAlertService } from './admin-alert.service';
 import { DailyBriefJob } from './daily-brief.job';
+import { JobsDiagnosticsService } from './jobs-diagnostics.service';
 import { ReminderJob } from './reminder.job';
 
 @Module({
   imports: [ScheduleModule.forRoot(), TelegramModule, GoogleModule],
-  providers: [AdminAlertService, ReminderJob, DailyBriefJob],
-  exports: [AdminAlertService],
+  providers: [AdminAlertService, ReminderJob, DailyBriefJob, JobsDiagnosticsService],
+  exports: [AdminAlertService, JobsDiagnosticsService],
 })
 export class JobsModule {}

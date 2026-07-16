@@ -8,6 +8,20 @@ import { AppModule } from './app.module';
 import { ZodExceptionFilter } from './common/zod-exception.filter';
 import type { Env } from './config/env.validation';
 
+// A stray unhandled promise rejection must NEVER silently take down the API
+// (which would stop the reminder cron and every request). Log and keep serving.
+process.on('unhandledRejection', (reason) => {
+  const logger = new Logger('unhandledRejection');
+  logger.error(reason instanceof Error ? (reason.stack ?? reason.message) : String(reason));
+});
+// An uncaught EXCEPTION leaves the process in an undefined state — log it and
+// exit so Docker's `restart: always` gives us a clean process (the cron then
+// catches up on boot, and no request is served from a corrupt state).
+process.on('uncaughtException', (err) => {
+  new Logger('uncaughtException').error(err.stack ?? err.message);
+  process.exit(1);
+});
+
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableShutdownHooks();
