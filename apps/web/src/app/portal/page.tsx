@@ -13,6 +13,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ReminderLeadsEditor, leadsToMinutes } from "@/components/reminder-leads-editor";
 
 export default function PortalPage() {
   const router = useRouter();
@@ -564,7 +565,8 @@ function ChatOnTelegram({ me }: { me: ClientMe }) {
 }
 
 function Preferences({ me, onChanged }: { me: ClientMe; onChanged: () => void | Promise<void> }) {
-  const [reminder, setReminder] = useState(String(me.defaultReminderMinutes));
+  const [leads, setLeads] = useState<string[]>(me.reminderLeads.map(String));
+  const [meetingLen, setMeetingLen] = useState(String(me.defaultMeetingMinutes));
   const [briefHour, setBriefHour] = useState(String(me.dailyBriefHour));
   const [busy, setBusy] = useState(false);
   const [ok, setOk] = useState(false);
@@ -579,7 +581,8 @@ function Preferences({ me, onChanged }: { me: ClientMe; onChanged: () => void | 
       await portalApi("/client/preferences", {
         method: "PATCH",
         body: {
-          defaultReminderMinutes: Number(reminder),
+          reminderLeads: leadsToMinutes(leads),
+          defaultMeetingMinutes: Number(meetingLen),
           dailyBriefHour: Number(briefHour),
         },
       });
@@ -597,48 +600,48 @@ function Preferences({ me, onChanged }: { me: ClientMe; onChanged: () => void | 
       <CardHeader>
         <CardTitle>Preferences</CardTitle>
         <CardDescription>
-          How far ahead to remind you, and when to send your daily summary. Your assistant follows
-          these — and you can always override a single reminder just by asking it in chat.
+          Your meeting reminders, default meeting length, and daily-summary time. Your assistant
+          follows these — and you can always change a reminder just by asking it in chat.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={save} className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <div className="flex-1 space-y-1.5">
-            <label htmlFor="rem" className="text-sm font-medium">
-              Remind me before tasks
-            </label>
-            <select
-              id="rem"
-              className="w-full rounded-md border bg-background p-2 text-sm"
-              value={reminder}
-              onChange={(e) => setReminder(e.target.value)}
-            >
-              <option value="0">No automatic reminders</option>
-              <option value="5">5 minutes before</option>
-              <option value="10">10 minutes before</option>
-              <option value="15">15 minutes before</option>
-              <option value="30">30 minutes before</option>
-              <option value="60">1 hour before</option>
-              <option value="120">2 hours before</option>
-              <option value="1440">1 day before</option>
-            </select>
-          </div>
-          <div className="flex-1 space-y-1.5">
-            <label htmlFor="brief" className="text-sm font-medium">
-              Daily summary at
-            </label>
-            <select
-              id="brief"
-              className="w-full rounded-md border bg-background p-2 text-sm"
-              value={briefHour}
-              onChange={(e) => setBriefHour(e.target.value)}
-            >
-              {Array.from({ length: 24 }, (_, h) => (
-                <option key={h} value={h}>
-                  {formatHour(h)}
-                </option>
-              ))}
-            </select>
+        <form onSubmit={save} className="space-y-5">
+          <ReminderLeadsEditor leads={leads} onChange={setLeads} idPrefix="portal" />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <label htmlFor="meetlen" className="text-sm font-medium">
+                Default meeting length
+              </label>
+              <select
+                id="meetlen"
+                className="w-full rounded-md border bg-background p-2 text-sm"
+                value={meetingLen}
+                onChange={(e) => setMeetingLen(e.target.value)}
+              >
+                {[15, 30, 45, 60, 90, 120, 180].map((m) => (
+                  <option key={m} value={m}>
+                    {m < 60 ? `${m} minutes` : `${m / 60} hour${m >= 120 ? "s" : ""}${m % 60 ? " 30 min" : ""}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="brief" className="text-sm font-medium">
+                Daily summary at
+              </label>
+              <select
+                id="brief"
+                className="w-full rounded-md border bg-background p-2 text-sm"
+                value={briefHour}
+                onChange={(e) => setBriefHour(e.target.value)}
+              >
+                {Array.from({ length: 24 }, (_, h) => (
+                  <option key={h} value={h}>
+                    {formatHour(h)}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           <Button type="submit" disabled={busy}>
             {busy ? "Saving…" : "Save"}

@@ -9,6 +9,12 @@ import type {
   MemoryCategory,
 } from '@prisma/client';
 
+/** Dedupe, positives only, sorted earliest-ping-first — the ONE normalization
+ * for a client's reminder lead list, reused by the repo, admin API and portal. */
+export function normalizeReminderLeads(leads: number[]): number[] {
+  return Array.from(new Set(leads.filter((n) => Number.isInteger(n) && n > 0))).sort((a, b) => b - a);
+}
+
 /**
  * THE tenant-isolation choke point.
  *
@@ -207,15 +213,11 @@ export class ClientScopedRepository {
   }
 
   /** Set the client's default reminder lead times (minutes before a meeting).
-   * Each value = one Telegram ping; [] = no automatic reminders. Normalized:
-   * de-duped, positives only, sorted largest-first (earliest ping first). */
+   * Each value = one Telegram ping; [] = no automatic reminders. Normalized. */
   async setReminderLeads(leads: number[]): Promise<void> {
-    const clean = Array.from(new Set(leads.filter((n) => Number.isInteger(n) && n > 0))).sort(
-      (a, b) => b - a,
-    );
     await this.prisma.client.update({
       where: { id: this.clientId },
-      data: { reminderLeads: clean },
+      data: { reminderLeads: normalizeReminderLeads(leads) },
     });
   }
 

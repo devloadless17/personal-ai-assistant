@@ -22,6 +22,7 @@ import { describeRecurrence } from '../tools/tasks.tools';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenancyService } from '../tenancy/tenancy.service';
+import { normalizeReminderLeads } from '../tenancy/client-scoped-repository';
 import type { Env } from '../config/env.validation';
 import { ClientAuthGuard, type ClientRequest } from './client-auth.guard';
 import { ClientAuthService } from './client-auth.service';
@@ -34,12 +35,17 @@ const rangeSchema = z.object({
 // The client controls their own reminder lead time and daily-summary hour.
 const preferencesSchema = z
   .object({
-    defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
+    reminderLeads: z.array(z.number().int().min(1).max(10080)).max(5).optional(),
+    defaultMeetingMinutes: z.number().int().min(5).max(1440).optional(),
     dailyBriefHour: z.number().int().min(0).max(23).optional(),
   })
-  .refine((v) => v.defaultReminderMinutes !== undefined || v.dailyBriefHour !== undefined, {
-    message: 'Provide at least one preference to update.',
-  });
+  .refine(
+    (v) =>
+      v.reminderLeads !== undefined ||
+      v.defaultMeetingMinutes !== undefined ||
+      v.dailyBriefHour !== undefined,
+    { message: 'Provide at least one preference to update.' },
+  );
 
 const memoryUpdateSchema = z
   .object({
@@ -119,17 +125,25 @@ export class ClientController {
       telegramChatBound: Boolean(client.telegramChatId),
       googleConnected: Boolean(client.googleOAuthEnc),
       googleNeedsReauth: client.googleNeedsReauth,
-      defaultReminderMinutes: client.defaultReminderMinutes,
+      reminderLeads: client.reminderLeads,
+      defaultMeetingMinutes: client.defaultMeetingMinutes,
       dailyBriefHour: client.dailyBriefHour,
     };
   }
 
-  /** The client sets their own reminder lead time and daily-summary hour. */
+  /** The client sets their own meeting reminders, meeting length and daily
+   * summary hour. Reminder leads are normalized (dedupe/positive/sort). */
   @UseGuards(ClientAuthGuard)
   @Patch('preferences')
   async updatePreferences(@Req() req: ClientRequest, @Body() body: unknown): Promise<ClientMe> {
     const prefs = preferencesSchema.parse(body);
-    await this.prisma.client.update({ where: { id: req.client.sub }, data: prefs });
+    await this.prisma.client.update({
+      where: { id: req.client.sub },
+      data: {
+        ...prefs,
+        ...(prefs.reminderLeads ? { reminderLeads: normalizeReminderLeads(prefs.reminderLeads) } : {}),
+      },
+    });
     return this.me(req);
   }
 

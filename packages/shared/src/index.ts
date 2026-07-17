@@ -34,7 +34,10 @@ export interface ClientSummary {
   telegramChatBound: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
-  defaultReminderMinutes: number;
+  /** Reminder lead times (minutes before a meeting) — one ping each. [] = off. */
+  reminderLeads: number[];
+  /** Default meeting length (minutes) when only a start time is given. */
+  defaultMeetingMinutes: number;
   dailyBriefHour: number;
   createdAt: string;
 }
@@ -52,7 +55,10 @@ export interface ClientMe {
   telegramChatBound: boolean;
   googleConnected: boolean;
   googleNeedsReauth: boolean;
-  defaultReminderMinutes: number;
+  /** Reminder lead times (minutes before a meeting) — one ping each. [] = off. */
+  reminderLeads: number[];
+  /** Default meeting length (minutes) when only a start time is given. */
+  defaultMeetingMinutes: number;
   dailyBriefHour: number;
 }
 

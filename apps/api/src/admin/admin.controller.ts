@@ -32,7 +32,8 @@ const createClientSchema = z.object({
   timezone: z.string().min(1).default('Asia/Beirut'),
   assistantName: z.string().min(1).max(100).default('Assistant'),
   email: z.string().email().toLowerCase().optional(),
-  defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
+  reminderLeads: z.array(z.number().int().min(1).max(10080)).max(5).optional(),
+  defaultMeetingMinutes: z.number().int().min(5).max(1440).optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });
 
@@ -42,7 +43,8 @@ const updateClientSchema = z.object({
   assistantName: z.string().min(1).max(100).optional(),
   email: z.string().email().toLowerCase().optional(),
   status: z.enum(['active', 'disabled']).optional(),
-  defaultReminderMinutes: z.number().int().min(0).max(1440).optional(),
+  reminderLeads: z.array(z.number().int().min(1).max(10080)).max(5).optional(),
+  defaultMeetingMinutes: z.number().int().min(5).max(1440).optional(),
   dailyBriefHour: z.number().int().min(0).max(23).optional(),
 });
 

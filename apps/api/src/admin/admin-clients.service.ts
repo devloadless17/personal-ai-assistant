@@ -14,6 +14,7 @@ import type {
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { TelegramConnectionService } from '../integrations/telegram/telegram-connection.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeReminderLeads } from '../tenancy/client-scoped-repository';
 
 function summarize(c: Client): ClientSummary {
   return {
@@ -32,7 +33,8 @@ function summarize(c: Client): ClientSummary {
     telegramChatBound: Boolean(c.telegramChatId),
     googleConnected: Boolean(c.googleOAuthEnc),
     googleNeedsReauth: c.googleNeedsReauth,
-    defaultReminderMinutes: c.defaultReminderMinutes,
+    reminderLeads: c.reminderLeads,
+    defaultMeetingMinutes: c.defaultMeetingMinutes,
     dailyBriefHour: c.dailyBriefHour,
     createdAt: c.createdAt.toISOString(),
   };
@@ -70,14 +72,19 @@ export class AdminClientsService {
     timezone: string;
     assistantName: string;
     email?: string;
-    defaultReminderMinutes?: number;
+    reminderLeads?: number[];
+    defaultMeetingMinutes?: number;
     dailyBriefHour?: number;
   }): Promise<ClientSummary> {
     this.assertValidTimezone(data.timezone);
     // Seed homeTimezone from the initial zone so travel detection + "back home"
     // work immediately for new clients (the migration backfills existing rows).
     const client = await this.prisma.client.create({
-      data: { ...data, homeTimezone: data.timezone },
+      data: {
+        ...data,
+        homeTimezone: data.timezone,
+        ...(data.reminderLeads ? { reminderLeads: normalizeReminderLeads(data.reminderLeads) } : {}),
+      },
     });
     this.logger.log(`Client created: ${client.id} (${client.name})`);
     return summarize(client);
@@ -91,7 +98,8 @@ export class AdminClientsService {
       assistantName: string;
       email: string;
       status: 'active' | 'disabled';
-      defaultReminderMinutes: number;
+      reminderLeads: number[];
+      defaultMeetingMinutes: number;
       dailyBriefHour: number;
     }>,
   ): Promise<ClientSummary> {
@@ -101,7 +109,11 @@ export class AdminClientsService {
       // zone → keep homeTimezone in step so "back home" and away-detection align.
       const client = await this.prisma.client.update({
         where: { id },
-        data: data.timezone ? { ...data, homeTimezone: data.timezone } : data,
+        data: {
+          ...data,
+          ...(data.timezone ? { homeTimezone: data.timezone } : {}),
+          ...(data.reminderLeads ? { reminderLeads: normalizeReminderLeads(data.reminderLeads) } : {}),
+        },
       });
       return summarize(client);
     } catch {
