@@ -105,6 +105,28 @@ export class ClientScopedRepository {
     return task?.reminderLeadMinutes ?? null;
   }
 
+  /** The companion reminder's lead + recurrence, so moving a RECURRING meeting
+   * can recreate a companion that still recurs (not silently a one-shot). */
+  async getEventReminder(eventId: string): Promise<{
+    reminderLeadMinutes: number | null;
+    recurrenceFreq: RecurrenceFreq | null;
+    recurrenceInterval: number | null;
+    recurrenceWeekdays: number[];
+    recurrenceUntil: Date | null;
+  } | null> {
+    const t = await this.prisma.task.findFirst({
+      where: { clientId: this.clientId, sourceEventId: eventId },
+      select: {
+        reminderLeadMinutes: true,
+        recurrenceFreq: true,
+        recurrenceInterval: true,
+        recurrenceWeekdays: true,
+        recurrenceUntil: true,
+      },
+    });
+    return t ?? null;
+  }
+
   /** Returns the updated task, or null if no row matched (id AND clientId). */
   async updateTask(
     id: string,

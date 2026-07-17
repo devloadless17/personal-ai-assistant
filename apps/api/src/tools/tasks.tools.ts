@@ -245,6 +245,7 @@ export const updateTask = defineTool({
     const needsExisting =
       (reminder_minutes_before != null && due_at === undefined) ||
       due_at !== undefined ||
+      reminder_at !== undefined ||
       rest.type === 'reminder';
     const existing = needsExisting ? await ctx.repo.findTaskById(task_id) : null;
 
@@ -296,7 +297,12 @@ export const updateTask = defineTool({
     }
     const recurrencePatch =
       repeat === undefined
-        ? {}
+        ? // Recurrence unchanged — but if the TIME moved on a still-recurring
+          // task, re-anchor so MONTHLY doesn't revert to the old day-of-month
+          // (and weekly parity tracks the new time).
+          existing?.recurrenceFreq && rem.changed && resultingReminder
+          ? { recurrenceAnchor: resultingReminder }
+          : {}
         : repeat === null
           ? {
               recurrenceFreq: null,

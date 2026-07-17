@@ -78,14 +78,24 @@ export class DailyBriefJob implements OnApplicationBootstrap {
   }
 
   async run(now: Date): Promise<void> {
-    const clients = await this.prisma.client.findMany({
-      where: { status: 'active', telegramChatId: { not: null } },
-    });
     this.lastSentCount = 0;
-    // Bounded concurrency: each due client does a live Google read + send, so
-    // process several in parallel instead of serially (avoids overrunning the
-    // 10-min tick as the client base grows). The atomic per-client claim keeps
-    // this safe.
+    // Two-phase for scale: phase 1 pulls only the tiny columns needed to decide
+    // who is DUE this tick (avoids materializing every client's encrypted token +
+    // OAuth blobs every 10 min). Phase 2 loads full rows for the due few only.
+    const candidates = await this.prisma.client.findMany({
+      where: { status: 'active', telegramChatId: { not: null } },
+      select: { id: true, timezone: true, dailyBriefHour: true, lastBriefDate: true },
+    });
+    const dueIds = candidates
+      .filter(
+        (c) =>
+          this.localHour(now, c.timezone) >= c.dailyBriefHour &&
+          c.lastBriefDate !== this.localDate(now, c.timezone),
+      )
+      .map((c) => c.id);
+    if (dueIds.length === 0) return;
+    const clients = await this.prisma.client.findMany({ where: { id: { in: dueIds } } });
+    // Bounded concurrency: each due client does a live Google read + send.
     await mapWithConcurrency(clients, BRIEF_CONCURRENCY, (client) => this.processClient(client, now));
   }
 
@@ -210,10 +220,14 @@ export class DailyBriefJob implements OnApplicationBootstrap {
   }
 
   private localHour(now: Date, tz: string): number {
-    return Number(
+    const h = Number(
       new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(
         now,
       ),
     );
+    // Some ICU builds emit "24" for local midnight — normalize to 0, else a
+    // 00:00 tick would pass the hour gate, send an "evening" brief at midnight,
+    // and suppress the client's real morning/evening brief.
+    return h === 24 ? 0 : h;
   }
 }

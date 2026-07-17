@@ -18,27 +18,26 @@ export default function PortalPage() {
   const router = useRouter();
   const [me, setMe] = useState<ClientMe | null>(null);
   const [tasks, setTasks] = useState<PortalTask[]>([]);
-  const [calendar, setCalendar] = useState<{ connected: boolean; events: PortalEvent[] } | null>(
-    null,
-  );
   const [memories, setMemories] = useState<PortalMemory[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    try {
-      const [m, t, c, mem] = await Promise.all([
-        portalApi<ClientMe>("/client/me"),
-        portalApi<PortalTask[]>("/client/tasks"),
-        portalApi<{ connected: boolean; events: PortalEvent[] }>("/client/calendar"),
-        portalApi<PortalMemory[]>("/client/memory"),
-      ]);
-      setMe(m);
-      setTasks(t);
-      setCalendar(c);
-      setMemories(mem);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load your data");
+    // Settle independently so one failing endpoint doesn't blank the whole
+    // portal; only a failing /me is fatal. Calendar EVENTS are fetched by the
+    // month view itself (which paginates the visible range), so we don't fetch
+    // them here — `me.googleConnected` tells us whether to show them.
+    const [mR, tR, memR] = await Promise.allSettled([
+      portalApi<ClientMe>("/client/me"),
+      portalApi<PortalTask[]>("/client/tasks"),
+      portalApi<PortalMemory[]>("/client/memory"),
+    ]);
+    if (mR.status !== "fulfilled") {
+      setError(mR.reason instanceof Error ? mR.reason.message : "Failed to load your data");
+      return;
     }
+    setMe(mR.value);
+    if (tR.status === "fulfilled") setTasks(tR.value);
+    if (memR.status === "fulfilled") setMemories(memR.value);
   }, []);
 
   useEffect(() => {
@@ -97,7 +96,7 @@ export default function PortalPage() {
       <ChatOnTelegram me={me} />
       <Preferences me={me} onChanged={load} />
 
-      <MonthCalendar me={me} tasks={tasks} calendarConnected={calendar?.connected ?? false} />
+      <MonthCalendar me={me} tasks={tasks} calendarConnected={me.googleConnected} />
 
       {tasks.some((t) => t.recurrence) && (
         <Card>
@@ -111,7 +110,7 @@ export default function PortalPage() {
                 .filter((t) => t.recurrence)
                 .map((t) => (
                   <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
-                    <span className="text-sm">
+                    <span className="min-w-0 break-words text-sm">
                       {t.title}
                       <span className="ml-2 text-xs text-muted-foreground">· {t.recurrence}</span>
                     </span>
@@ -145,7 +144,7 @@ export default function PortalPage() {
                 .filter((t) => !t.recurrence)
                 .map((t) => (
                   <li key={t.id} className="flex items-start justify-between gap-3 border-b pb-2 last:border-0">
-                    <span className="text-sm">{t.title}</span>
+                    <span className="min-w-0 break-words text-sm">{t.title}</span>
                     <span className="text-right text-xs text-muted-foreground">
                       <span className="block whitespace-nowrap">
                         {t.dueAt
@@ -186,12 +185,16 @@ function AssistantMemory({
   onChanged: () => void | Promise<void>;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const remove = async (id: string) => {
     setBusyId(id);
+    setError(null);
     try {
       await portalApi(`/client/memory/${id}`, { method: "DELETE" });
       await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't remove that — please try again.");
     } finally {
       setBusyId(null);
     }
@@ -207,6 +210,11 @@ function AssistantMemory({
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {error && (
+          <p className="mb-2 text-xs text-red-600 dark:text-red-400" role="alert">
+            {error}
+          </p>
+        )}
         {memories.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Nothing remembered yet. As you chat, your assistant will learn your preferences.
@@ -227,7 +235,7 @@ function AssistantMemory({
                         key={m.id}
                         className="flex items-start justify-between gap-3 border-b pb-1 last:border-0"
                       >
-                        <span className="text-sm">{m.value}</span>
+                        <span className="min-w-0 break-words text-sm">{m.value}</span>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -270,6 +278,19 @@ function localYMD(iso: string, tz: string): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(iso));
+}
+
+/** Minutes into the LOCAL day (client tz) — for ordering same-day items. */
+function localMinutes(iso: string, tz: string): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(iso));
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return (h === 24 ? 0 : h) * 60 + m;
 }
 
 type GridCell = { y: number; m: number; d: number; inMonth: boolean; key: string };
@@ -365,15 +386,15 @@ function MonthCalendar({
         label: e.title,
         kind: e.attendees && e.attendees.length > 0 ? "meeting" : "event",
         time: e.allDay ? undefined : formatTime(e.start, tz),
-        sort: e.allDay ? -1 : new Date(e.start).getTime() % 86_400_000,
+        sort: e.allDay ? -1 : localMinutes(e.start, tz),
       });
     }
     for (const t of tasks) {
       const kind = t.type === "reminder" ? ("reminder" as const) : ("task" as const);
       const timeIso = t.reminderAt ?? t.dueAt;
       const time = timeIso ? formatTime(timeIso, tz) : undefined;
-      // Minutes-into-day for stable ordering of same-day items.
-      const minute = timeIso ? new Date(timeIso).getTime() % 86_400_000 : 0;
+      // Local minutes-into-day for stable ordering of same-day items.
+      const minute = timeIso ? localMinutes(timeIso, tz) : 0;
       if (t.recurrenceFreq) {
         // Project the series onto EVERY matching day in the visible grid.
         for (const c of cells) {
@@ -388,9 +409,11 @@ function MonthCalendar({
     return map;
   }, [events, tasks, cells, tz]);
 
-  const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(
-    new Date(Date.UTC(ym.y, ym.m, 1)),
-  );
+  const monthLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC", // cells are UTC-based calendar dates; anchor the label to UTC too
+    month: "long",
+    year: "numeric",
+  }).format(new Date(Date.UTC(ym.y, ym.m, 1)));
   const shift = (delta: number) => {
     const total = ym.y * 12 + ym.m + delta;
     setYm({ y: Math.floor(total / 12), m: ((total % 12) + 12) % 12 });

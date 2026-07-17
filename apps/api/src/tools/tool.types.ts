@@ -73,6 +73,9 @@ export interface CalendarEvent {
   attendees?: string[];
   /** True if this is an instance of (or) a recurring series. */
   recurring?: boolean;
+  /** The recurring-series master id (== id for non-recurring). Companion
+   * reminders key off this so a read instance-id still resolves the series. */
+  seriesId?: string;
 }
 
 /**

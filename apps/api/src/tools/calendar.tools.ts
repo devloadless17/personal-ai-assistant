@@ -180,27 +180,35 @@ export const createCalendarEvent = defineTool({
     if (input.reminder_minutes_before && input.reminder_minutes_before > 0) {
       // A companion reminder in our DB drives the Telegram ping via the same
       // reliable reminder cron the tasks use (the calendar itself is not
-      // polled). It's linked to the event id so it moves/cancels with it.
+      // polled). Keyed on the SERIES master id so it moves/cancels with the event.
       const reminderAt = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
       if (reminderAt.getTime() > ctx.now.getTime()) {
-        // A recurring meeting gets a RECURRING companion reminder so the client
-        // is pinged before EACH occurrence — unless the pattern is one our DB
-        // cron can't represent (weekly interval>1 with weekdays), where we fall
-        // back to a one-shot ping for the first occurrence.
+        // A recurring meeting gets a RECURRING companion reminder (ping before
+        // EACH occurrence) — unless the pattern is one our DB cron can't
+        // represent (weekly interval>1 with weekdays), where it's one-shot.
         const rep = input.repeat;
-        const companionRecurrence =
+        const companionRec =
           rep && !(rep.freq === 'weekly' && (rep.interval ?? 1) > 1 && (rep.weekdays?.length ?? 0) > 0)
             ? { ...repeatToFields(rep), recurrenceAnchor: reminderAt }
-            : {};
-        await ctx.repo.createTask({
-          title: `Reminder: ${input.title}`,
-          type: 'reminder',
-          reminderAt,
-          sourceEventId: event.id,
-          reminderLeadMinutes: input.reminder_minutes_before,
-          ...companionRecurrence,
-        });
-        reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before${input.repeat ? ' each time' : ''}.`;
+            : null;
+        try {
+          await ctx.repo.createTask({
+            title: input.title, // the cron prefixes "⏰ Reminder:" — don't double it
+            type: 'reminder',
+            reminderAt,
+            sourceEventId: event.seriesId ?? event.id,
+            reminderLeadMinutes: input.reminder_minutes_before,
+            ...(companionRec ?? {}),
+          });
+          // Only say "each time" when the ping actually recurs.
+          reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before${companionRec ? ' each time' : ''}.`;
+        } catch {
+          // The event IS on the calendar; only the companion reminder failed.
+          // Degrade honestly rather than reporting total failure (which would
+          // make the client re-book → duplicate event).
+          reminderNote =
+            " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)";
+        }
       } else {
         // The lead time is already in the past (e.g. booking a meeting that
         // starts in under `reminder_minutes_before`). Never claim a reminder we
@@ -284,32 +292,51 @@ export const updateCalendarEvent = defineTool({
       ...(send_invites !== undefined ? { sendInvites: send_invites } : {}),
     });
 
-    // Keep the companion reminder correct: explicit lead wins; otherwise a
-    // moved event preserves its existing lead; a title-only edit leaves it be.
+    // Keep the companion reminder correct. Resolve the SERIES master id so a
+    // recurring instance still matches its (series-keyed) companion.
+    const seriesId = event.seriesId ?? event_id;
     let reminderNote = '';
     let desiredLead: number | null | undefined;
+    // Read the existing companion up front so a move can PRESERVE its recurrence.
+    const existingReminder = await ctx.repo.getEventReminder(seriesId);
     if (reminder_minutes_before !== undefined) desiredLead = reminder_minutes_before;
-    else if (start !== undefined) desiredLead = await ctx.repo.getEventReminderLead(event_id);
+    else if (start !== undefined) desiredLead = existingReminder?.reminderLeadMinutes ?? undefined;
     if (desiredLead !== undefined) {
-      await ctx.repo.deleteEventReminders(event_id);
-      if (desiredLead && desiredLead > 0) {
-        const remAt = new Date(event.start.getTime() - desiredLead * 60_000);
-        if (remAt.getTime() > ctx.now.getTime()) {
-          await ctx.repo.createTask({
-            title: `Reminder: ${event.title}`,
-            type: 'reminder',
-            reminderAt: remAt,
-            sourceEventId: event_id,
-            reminderLeadMinutes: desiredLead,
-          });
-          reminderNote = ` Reminder set ${desiredLead} min before.`;
-        } else if (event.start.getTime() > ctx.now.getTime()) {
-          // Lead time already past but the event is still upcoming — never drop
-          // the reminder silently; say so plainly so the reply can't imply one.
-          reminderNote = ` (Heads up: ${desiredLead} min before is already past, so I didn't set a separate reminder for it.)`;
+      try {
+        await ctx.repo.deleteEventReminders(seriesId);
+        if (desiredLead && desiredLead > 0) {
+          const remAt = new Date(event.start.getTime() - desiredLead * 60_000);
+          if (remAt.getTime() > ctx.now.getTime()) {
+            // Preserve recurrence on a move so a recurring meeting keeps pinging
+            // before EVERY occurrence, not just the next one.
+            const rec = existingReminder?.recurrenceFreq
+              ? {
+                  recurrenceFreq: existingReminder.recurrenceFreq,
+                  recurrenceInterval: existingReminder.recurrenceInterval ?? 1,
+                  recurrenceWeekdays: existingReminder.recurrenceWeekdays,
+                  recurrenceUntil: existingReminder.recurrenceUntil,
+                  recurrenceAnchor: remAt,
+                }
+              : {};
+            await ctx.repo.createTask({
+              title: event.title,
+              type: 'reminder',
+              reminderAt: remAt,
+              sourceEventId: seriesId,
+              reminderLeadMinutes: desiredLead,
+              ...rec,
+            });
+            reminderNote = ` Reminder set ${desiredLead} min before${existingReminder?.recurrenceFreq ? ' each time' : ''}.`;
+          } else if (event.start.getTime() > ctx.now.getTime()) {
+            reminderNote = ` (Heads up: ${desiredLead} min before is already past, so I didn't set a separate reminder for it.)`;
+          }
+        } else if (reminder_minutes_before === 0) {
+          reminderNote = ' Reminder removed.';
         }
-      } else if (reminder_minutes_before === 0) {
-        reminderNote = ' Reminder removed.';
+      } catch {
+        // Google move landed; only the companion DB work failed — degrade honestly.
+        reminderNote =
+          " (The event was updated, but I couldn't adjust its Telegram reminder — ask me to set it again.)";
       }
     }
     return `Updated on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
@@ -329,13 +356,14 @@ export const deleteCalendarEvent = defineTool({
     // gives a clean, quotable message instead of a raw Google 404/410.
     const existing = await ctx.calendar.getEvent(input.event_id);
     if (!existing) {
-      // Still clear any orphaned companion reminder, then report honestly.
+      // Still clear any orphaned companion reminder (by series id), then report.
       await ctx.repo.deleteEventReminders(input.event_id);
       return `ERROR: no calendar event with id ${input.event_id} exists (already removed?). Nothing to delete.`;
     }
     await ctx.calendar.deleteEvent(input.event_id);
-    // Cancel any Telegram reminder tied to this event so it never fires late.
-    await ctx.repo.deleteEventReminders(input.event_id);
+    // Cancel the companion reminder keyed on the SERIES master id — otherwise a
+    // recurring meeting's reminder keeps firing forever after cancellation.
+    await ctx.repo.deleteEventReminders(existing.seriesId ?? input.event_id);
     return `Deleted calendar event: ${existing.title}.`;
   },
 });

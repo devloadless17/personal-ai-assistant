@@ -19,17 +19,29 @@ export class GoogleCalendarGateway implements CalendarGateway {
   }
 
   async listEvents(params: { from: Date; to: Date; limit?: number }): Promise<CalendarEvent[]> {
-    const res = await this.calendar.events.list({
-      calendarId: 'primary',
-      timeMin: params.from.toISOString(),
-      timeMax: params.to.toISOString(),
-      singleEvents: true, // expands recurring events into instances
-      orderBy: 'startTime',
-      maxResults: Math.min(params.limit ?? 50, 100),
-    });
-    return (res.data.items ?? [])
-      .filter((e) => e.status !== 'cancelled')
-      .map((e) => this.toEvent(e));
+    // Paginate through the whole window (up to `limit`) so a busy month / a wide
+    // conflict-scan window never SILENTLY drops events past the first page —
+    // which would truncate the calendar grid or offer an already-busy slot.
+    const limit = params.limit ?? 250;
+    const out: CalendarEvent[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 20 && out.length < limit; page++) {
+      const res = await this.calendar.events.list({
+        calendarId: 'primary',
+        timeMin: params.from.toISOString(),
+        timeMax: params.to.toISOString(),
+        singleEvents: true, // expands recurring events into instances
+        orderBy: 'startTime',
+        maxResults: Math.min(limit - out.length, 250),
+        pageToken,
+      });
+      for (const e of res.data.items ?? []) {
+        if (e.status !== 'cancelled') out.push(this.toEvent(e));
+      }
+      pageToken = res.data.nextPageToken ?? undefined;
+      if (!pageToken) break;
+    }
+    return out;
   }
 
   async getEvent(eventId: string): Promise<CalendarEvent | null> {
@@ -213,6 +225,9 @@ export class GoogleCalendarGateway implements CalendarGateway {
       attendees: attendees.length > 0 ? attendees : undefined,
       // A series master has `recurrence`; an expanded instance has `recurringEventId`.
       recurring: Boolean(e.recurringEventId ?? e.recurrence),
+      // Resolve the series master id so companion-reminder lookups (keyed on the
+      // master) still match when we're handed an expanded instance id.
+      seriesId: e.recurringEventId ?? e.id,
     };
   }
 }

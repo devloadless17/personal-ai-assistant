@@ -52,6 +52,7 @@ function ctxWith(gateway?: CalendarGateway): ToolContext {
     createTask: jest.fn().mockResolvedValue({}),
     deleteEventReminders: jest.fn().mockResolvedValue(undefined),
     getEventReminderLead: jest.fn().mockResolvedValue(null),
+    getEventReminder: jest.fn().mockResolvedValue(null),
   } as unknown as ClientScopedRepository;
   return {
     repo,
@@ -267,6 +268,30 @@ describe('calendar tools — conflict gating & honesty', () => {
     // Companion reminder is itself recurring, anchored to the ping time.
     expect(created[0]?.recurrenceFreq).toBe('WEEKLY');
     expect(created[0]?.recurrenceWeekdays).toEqual([6]);
+  });
+
+  it('deleting a recurring instance clears the companion reminder by SERIES id', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260725T090000Z',
+      seriesId: 'evt',
+      title: 'Standup',
+      start: new Date('2026-07-25T09:00:00Z'),
+      end: new Date('2026-07-25T09:15:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const ctx = ctxWith(gw);
+    const delCalls: string[] = [];
+    (ctx.repo as unknown as { deleteEventReminders: jest.Mock }).deleteEventReminders = jest
+      .fn()
+      .mockImplementation((id: string) => {
+        delCalls.push(id);
+        return Promise.resolve();
+      });
+    await deleteCalendarEvent.execute({ event_id: 'evt_20260725T090000Z' }, ctx);
+    // Cleared by the SERIES master id, so a recurring reminder stops firing.
+    expect(delCalls).toContain('evt');
   });
 
   it('every calendar tool answers honestly when Google is not connected', async () => {

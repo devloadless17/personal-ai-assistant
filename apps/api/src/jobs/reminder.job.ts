@@ -150,12 +150,11 @@ export class ReminderJob implements OnApplicationBootstrap {
       this.lastSentCount += 1;
       this.logger.log(`Reminder sent for task ${task.id} (client ${client.id})`);
     } catch (err) {
-      // Release the lease immediately so the next tick retries without waiting
-      // out the lease window; alert on the failure.
-      await this.prisma.task.updateMany({
-        where: { id: task.id, reminderSent: false },
-        data: { reminderClaimedAt: null },
-      });
+      // KEEP the lease (do NOT null it): reminderSent stays false, but the row
+      // stays claimed so it's excluded until the lease expires (~3 min) — natural
+      // backoff. Nulling it here would let the same-tick drain loop re-fetch the
+      // failing batch immediately and hot-spin for the whole budget, starving
+      // other due reminders. At-least-once still holds (retry after lease expiry).
       this.logger.error(
         `Reminder send failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -174,6 +173,7 @@ export class ReminderJob implements OnApplicationBootstrap {
    * row can never get stuck re-sending.
    */
   private async advanceOrComplete(task: Task, timezone: string, now: Date): Promise<void> {
+    let computeFailed = false;
     try {
       if (task.recurrenceFreq && task.reminderAt) {
         // Advance to the FIRST occurrence strictly after now — so an outage that
@@ -216,16 +216,25 @@ export class ReminderJob implements OnApplicationBootstrap {
         }
       }
     } catch (err) {
+      computeFailed = true;
       this.logger.error(
         `Failed to compute next occurrence for recurring task ${task.id}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      // Don't silently convert a recurring series into a one-shot on a compute
+      // error (e.g. a bad timezone): mark this send done but KEEP the recurrence
+      // fields intact and alert the admin so it can be repaired, not lost.
+      await this.alerts.alert(
+        'reminder-recurrence',
+        `Couldn't compute the next occurrence for a recurring reminder (task ${task.id}) — its recurrence is paused; check the client's timezone.`,
+      );
     }
-    // One-shot fired, or a recurring SERIES that has ended. For a finished
-    // recurring reminder also mark it done + clear recurrence so it doesn't
-    // linger as a perpetual open item in task lists.
+    // One-shot fired, or a recurring SERIES that has ended (past `until`). A
+    // finished series is also marked done + recurrence cleared so it doesn't
+    // linger as a perpetual open item — but NOT on a compute failure, where we
+    // preserve the recurrence for repair.
     await this.prisma.task.updateMany({
       where: { id: task.id },
-      data: task.recurrenceFreq
+      data: task.recurrenceFreq && !computeFailed
         ? { reminderSent: true, status: 'done', recurrenceFreq: null }
         : { reminderSent: true },
     });

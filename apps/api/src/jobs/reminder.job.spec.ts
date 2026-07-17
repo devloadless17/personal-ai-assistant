@@ -128,16 +128,16 @@ describe('ReminderJob — at-least-once lease/send/confirm', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('releases the lease (never marks sent) and alerts when the send fails', async () => {
+  it('KEEPS the lease on send failure (backoff, never lost) and alerts', async () => {
     const { job, sent, updates, alerts } = makeJob({ sendFails: true });
     await job.run(new Date('2026-07-16T10:00:00Z'));
     expect(sent).toHaveLength(0);
-    // Lease released so the next tick retries — reminderSent is NEVER set true,
-    // so the reminder is not silently lost.
-    expect(updates[updates.length - 1]).toEqual({
-      where: { id: 't1', reminderSent: false },
-      data: { reminderClaimedAt: null },
-    });
+    // The only write is the lease CLAIM; on failure we do NOT null the lease
+    // (that would let the drain loop hot-spin the same failing batch). The row
+    // stays claimed → excluded until the lease expires → natural backoff.
+    expect(updates).toHaveLength(1);
+    expect((updates[0]?.data as { reminderClaimedAt?: Date }).reminderClaimedAt).toBeInstanceOf(Date);
+    // reminderSent is NEVER set true → at-least-once holds (retry after expiry).
     expect(updates.some((u) => (u.data as { reminderSent?: boolean }).reminderSent === true)).toBe(
       false,
     );

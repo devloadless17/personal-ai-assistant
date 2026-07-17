@@ -101,6 +101,8 @@ model Client {
   conflictAlerts CalendarConflictAlert[]
 
   @@index([status])
+  // Admin client list: ORDER BY createdAt DESC
+  @@index([createdAt])
 }
 
 model Task {
@@ -157,6 +159,8 @@ model Task {
   @@index([clientId, createdAt])
   // Companion-reminder lookup on event move/delete
   @@index([clientId, sourceEventId])
+  // Admin diagnostics "recent reminders" panel: global ORDER BY reminderAt DESC
+  @@index([reminderAt])
 }
 
 model Memory {

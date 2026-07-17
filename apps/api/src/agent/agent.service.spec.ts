@@ -461,6 +461,26 @@ describe('AgentService — reliability invariants', () => {
     expect(state.tasks[0]?.title).toBe('2026-01-01');
   });
 
+  it('after a successful mutation, a transient error does NOT falsely claim "nothing was changed"', async () => {
+    const { repo, state } = makeFakeRepo();
+    const createMessage = jest.fn<Promise<Anthropic.Message>, unknown[]>();
+    createMessage.mockResolvedValueOnce(toolUseResponse('create_task', { title: 'buy milk' }));
+    createMessage.mockRejectedValueOnce(new Error('529 overloaded')); // summarization turn fails
+    const anthropic = {
+      isConfigured: true,
+      model: 'claude-opus-4-8',
+      createMessage,
+    } as unknown as AnthropicService;
+    const tenancy = { repoFor: () => repo } as unknown as TenancyService;
+    const agent = new AgentService(anthropic, tenancy);
+
+    const reply = await agent.respond(CLIENT);
+    expect(state.tasks).toHaveLength(1); // the mutation really happened
+    // Must NOT say "Nothing was changed" (false) or invite a blind retry → duplicate.
+    expect(reply).not.toContain('Nothing was changed');
+    expect(reply.toLowerCase()).toContain('part of');
+  });
+
   it('anthropic API failure returns an honest error, never a fake success', async () => {
     const { repo } = makeFakeRepo();
     const createMessage = jest.fn().mockRejectedValue(new Error('529 overloaded'));

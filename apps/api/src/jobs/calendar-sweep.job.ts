@@ -95,19 +95,24 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
       where: { alertedAt: { lt: new Date(now.getTime() - ALERT_RETENTION_MS) } },
     });
 
-    const clients = await this.prisma.client.findMany({
+    // Two-phase for scale: phase 1 pulls only ids to pick this tick's shard,
+    // phase 2 loads full rows (encrypted tokens/OAuth) for the shard only.
+    const ids = await this.prisma.client.findMany({
       where: {
         status: 'active',
         telegramChatId: { not: null },
         googleOAuthEnc: { not: null },
       },
+      select: { id: true },
     });
     // Shard across ticks: each tick sweeps only ~1/SHARDS of clients (every
     // client swept once per SHARDS ticks), so a large client base doesn't do a
     // full-base live-Google scan every 10 min.
     const slot = this.ticks % SHARDS;
-    const mine = clients.filter((c) => hashId(c.id) % SHARDS === slot);
+    const mineIds = ids.filter((c) => hashId(c.id) % SHARDS === slot).map((c) => c.id);
     this.lastAlertCount = 0;
+    if (mineIds.length === 0) return;
+    const mine = await this.prisma.client.findMany({ where: { id: { in: mineIds } } });
     await mapWithConcurrency(mine, CONCURRENCY, (client) => this.sweepClient(client, now));
   }
 
@@ -150,6 +155,12 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.error(
         `Calendar sweep failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      // Throttled admin alert (1/hr/key) so a client whose Google auth/read
+      // persistently fails is surfaced, not silently un-swept.
+      await this.alerts.alert(
+        `sweep-${client.id}`,
+        `Calendar sweep failing for client "${client.name}" — check their Google connection.`,
       );
     }
   }

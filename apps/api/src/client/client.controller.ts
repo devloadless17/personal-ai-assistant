@@ -214,7 +214,9 @@ export class ClientController {
     const start = from ? new Date(from) : now;
     const end = to ? new Date(to) : new Date(now.getTime() + 7 * 24 * 60 * 60_000);
     const gateway = new GoogleCalendarGateway(auth, client.timezone);
-    const events = await gateway.listEvents({ from: start, to: end, limit: 50 });
+    // The portal month grid needs the whole month — paginated up to 500 so a
+    // busy calendar isn't silently truncated.
+    const events = await gateway.listEvents({ from: start, to: end, limit: 500 });
     return {
       connected: true,
       events: events.map((e) => ({

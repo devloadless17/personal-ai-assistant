@@ -45,16 +45,16 @@ const COMPLETION_CLAIM = new RegExp(
   [
     // Reply that OPENS with a completion verb: "Added …", "Booked …", "Done —".
     "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done|set|marked|saved)\\b",
-    // "All done", "All set" as a standalone confirmation.
-    "\\ball (done|set)\\b",
+    // "All done", "All set", "You're all set/booked" as a standalone confirmation.
+    "\\b(all (done|set)|you'?re all (set|booked))\\b",
     // First-person claim anywhere: "I added", "I've booked", "I'll set", "I have put".
     "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|put|arranged|confirmed|logged|remind)",
     // "Got it — reminder for 9:30" style.
     "\\bgot it\\b[\\s\\S]{0,40}\\bremind",
-    // Impersonal confirmations ("now" optional): "is scheduled", "is on your calendar".
+    // Impersonal confirmations ("now" optional): "is scheduled", "is/it's on your calendar", "is confirmed".
     "\\breminder(?:'?s)?\\s+(?:is\\s+|has\\s+been\\s+)?set\\b",
     "\\bi'?ll\\s+(?:remind|ping)\\s+you\\b",
-    "\\bis\\s+(?:now\\s+)?(on (?:your|the) calendar|scheduled|booked|set|in your (tasks|list))\\b",
+    "\\b(is|it'?s)\\s+(?:now\\s+)?(on (?:your|the) calendar|scheduled|booked|set|confirmed|in your (tasks|list))\\b",
   ].join("|"),
   "i",
 );
@@ -69,7 +69,7 @@ const FAILURE_ACK =
   /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to|booked|scheduled|planned|due|on)|not able|didn'?t go through|you'?re free|you have nothing|already (done|set|scheduled|booked))\b/i;
 
 /** Tool-input keys whose values are datetimes (the only fields we anchor). */
-const DATETIME_KEYS = new Set(['due_at', 'reminder_at', 'start', 'end', 'from', 'to']);
+const DATETIME_KEYS = new Set(['due_at', 'reminder_at', 'start', 'end', 'from', 'to', 'until']);
 
 /**
  * Rewrite offset-less ISO datetimes in tool input to carry the client
@@ -106,8 +106,10 @@ export interface CalendarGatewayFactory {
  *    executes the REAL tool against tenant-scoped data, writes an audit row,
  *    and feeds the actual result back (is_error on failure).
  * 3. Only when Claude stops requesting tools is its final text used as the
- *    reply. The model can never emit a confirmation this code didn't produce,
- *    and every action is provable from the audit log.
+ *    reply. Every tool EFFECT is real and provable from the audit log; the
+ *    reply text itself is additionally guarded by a completion-claim check
+ *    (see COMPLETION_CLAIM) that forces a correction if the model asserts an
+ *    action no successful mutation this turn backs up.
  */
 @Injectable()
 export class AgentService {
@@ -161,14 +163,21 @@ export class AgentService {
       return 'Something went wrong on my side — please send that again.';
     }
 
+    // Tracks whether any real mutation succeeded, so the error path below never
+    // claims "nothing was changed" when something actually did.
+    const outcome = { mutated: false };
     try {
-      return await this.runLoop(system, messages, ctx);
+      return await this.runLoop(system, messages, ctx, outcome);
     } catch (err) {
       // Honest failure — never pretend. Details go to logs, not the client.
       this.logger.error(
         `Agent loop failed for client ${client.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
       );
-      return 'Sorry — that didn’t go through on my side. Nothing was changed. Please try again in a moment.';
+      // If a mutation already succeeded before the error, DON'T say "nothing was
+      // changed" (false) and don't invite a blind retry that would duplicate it.
+      return outcome.mutated
+        ? 'I hit a problem partway through, so I may have only done part of that. Please check before sending it again, so nothing gets duplicated.'
+        : 'Sorry — that didn’t go through on my side. Nothing was changed. Please try again in a moment.';
     }
   }
 
@@ -176,9 +185,11 @@ export class AgentService {
     system: Anthropic.TextBlockParam[],
     messages: Anthropic.MessageParam[],
     ctx: ToolContext,
+    outcome: { mutated: boolean },
   ): Promise<string> {
     let successfulMutation = false;
     let mutationError = false;
+    let anyToolRan = false;
     let corrected = false;
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -199,9 +210,13 @@ export class AgentService {
         for (const use of toolUses) {
           const block = await this.executeTool(use, ctx);
           results.push(block);
+          anyToolRan = true;
           if (MUTATING_TOOLS.has(use.name)) {
             if (block.is_error === true) mutationError = true;
-            else successfulMutation = true;
+            else {
+              successfulMutation = true;
+              outcome.mutated = true;
+            }
           }
         }
         messages.push({ role: 'user', content: results });
@@ -227,12 +242,18 @@ export class AgentService {
       //       (catches "Added A and deleted B" when B failed).
       const text = this.extractText(response);
       const claimsCompletion = text ? COMPLETION_CLAIM.test(text) : false;
-      // An honest failure/no-op/availability acknowledgement exempts the reply
-      // in BOTH the no-mutation and errored-mutation cases — so a read-only
-      // answer ("you're all set — nothing booked") is never wrongly corrected.
+      // A turn where ONLY read tools ran (no mutation attempted) is a status /
+      // read-back answer ("yes, your reminder IS set for 9:30") grounded in that
+      // read — never force a correction on it, or we'd push a duplicate mutation.
+      const mutationAttempted = successfulMutation || mutationError;
+      const readOnlyTurn = anyToolRan && !mutationAttempted;
+      // An honest failure/no-op/availability acknowledgement also exempts the
+      // reply. Correction fires only when the reply claims a completed action
+      // that a real mutation this turn didn't back up.
       const fabricated =
         claimsCompletion &&
         !FAILURE_ACK.test(text) &&
+        !readOnlyTurn &&
         (!successfulMutation || mutationError);
       if (text && fabricated && !corrected) {
         corrected = true;

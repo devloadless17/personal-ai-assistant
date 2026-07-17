@@ -45,7 +45,12 @@ export class AdminClientsService {
   ) {}
 
   async list(): Promise<ClientSummary[]> {
-    const clients = await this.prisma.client.findMany({ orderBy: { createdAt: 'desc' } });
+    // Capped + index-backed (Client.createdAt). The admin manages tens of
+    // clients; a hard cap keeps this bounded if the roster ever grows large.
+    const clients = await this.prisma.client.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
     return clients.map(summarize);
   }
 
