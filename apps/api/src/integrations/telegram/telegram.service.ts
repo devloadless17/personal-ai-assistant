@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+/** A non-retryable Telegram failure (a 4xx) — surfaces immediately instead of
+ * being retried. Anything else is treated as transient. */
+class PermanentTelegramError extends Error {}
+
 /**
  * Telegram Bot API client. Plain fetch — the API is simple HTTP POST.
  * Retries transient failures with backoff; a final failure THROWS so callers
@@ -15,15 +19,38 @@ export class TelegramService {
     return `https://api.telegram.org/bot${botToken}/${method}`;
   }
 
+  /**
+   * Shared retry skeleton for every Telegram request: run `attempt`, retry
+   * transient failures with linear backoff, but surface a
+   * PermanentTelegramError (a 4xx) immediately. THROWS the last error after
+   * `retries` attempts — never a silent drop.
+   */
+  private async withRetry<T>(label: string, attempt: () => Promise<T>, retries = 3): Promise<T> {
+    let lastError: unknown;
+    for (let i = 1; i <= retries; i++) {
+      try {
+        return await attempt();
+      } catch (err) {
+        if (err instanceof PermanentTelegramError) throw err;
+        lastError = err;
+      }
+      if (i < retries) {
+        await new Promise((r) => setTimeout(r, i * 1500));
+      }
+    }
+    this.logger.error(`Telegram ${label} failed after ${retries} attempts`);
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
   private async call<T>(
     botToken: string,
     method: string,
     body: Record<string, unknown>,
     retries = 3,
   ): Promise<T> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
+    return this.withRetry(
+      method,
+      async () => {
         const res = await fetch(this.api(botToken, method), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -34,19 +61,14 @@ export class TelegramService {
         if (json.ok && json.result !== undefined) return json.result;
         // 4xx from Telegram (bad token, blocked bot…) — retrying won't help.
         if (res.status >= 400 && res.status < 500) {
-          throw new Error(`Telegram ${method} rejected: ${json.description ?? res.status}`);
+          throw new PermanentTelegramError(
+            `Telegram ${method} rejected: ${json.description ?? res.status}`,
+          );
         }
-        lastError = new Error(`Telegram ${method} failed: ${json.description ?? res.status}`);
-      } catch (err) {
-        if (err instanceof Error && err.message.startsWith('Telegram')) throw err;
-        lastError = err;
-      }
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, attempt * 1500));
-      }
-    }
-    this.logger.error(`Telegram ${method} failed after ${retries} attempts`);
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+        throw new Error(`Telegram ${method} failed: ${json.description ?? res.status}`);
+      },
+      retries,
+    );
   }
 
   async sendMessage(botToken: string, chatId: string | number, text: string): Promise<void> {
@@ -85,5 +107,33 @@ export class TelegramService {
   /** Validates a bot token and returns the bot's username. */
   async getMe(botToken: string): Promise<{ username: string }> {
     return this.call<{ username: string }>(botToken, 'getMe', {});
+  }
+
+  /** Resolves a file_id to a downloadable file_path on Telegram's file server. */
+  async getFile(botToken: string, fileId: string): Promise<{ file_path: string }> {
+    return this.call<{ file_path: string }>(botToken, 'getFile', { file_id: fileId });
+  }
+
+  /**
+   * Downloads a file's bytes from Telegram's file server. Separate request from
+   * `call()` because that endpoint returns JSON and this one returns binary,
+   * but it shares the same 15s timeout and retry/backoff via `withRetry`. The
+   * token is in the URL — never logged.
+   */
+  async downloadFile(botToken: string, filePath: string, retries = 3): Promise<Buffer> {
+    const url = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    return this.withRetry(
+      'file download',
+      async () => {
+        const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (res.ok) return Buffer.from(await res.arrayBuffer());
+        // 4xx (expired/invalid file_path) — retrying won't help.
+        if (res.status >= 400 && res.status < 500) {
+          throw new PermanentTelegramError(`Telegram file download rejected: ${res.status}`);
+        }
+        throw new Error(`Telegram file download failed: ${res.status}`);
+      },
+      retries,
+    );
   }
 }

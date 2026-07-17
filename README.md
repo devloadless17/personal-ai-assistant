@@ -60,6 +60,7 @@ Fill `.env` (everything is validated at boot — the API refuses to start on bad
 | `JWT_SECRET` | `openssl rand -hex 32` — signs dashboard sessions |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Your dashboard login (≥12 char password). Created automatically at first boot |
 | `ANTHROPIC_API_KEY` | From console.anthropic.com — the assistant's brain |
+| `OPENAI_API_KEY` | Optional: from platform.openai.com — transcribes client voice notes (Whisper). Leave blank to keep voice off |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | See §3 |
 | `ADMIN_ALERT_BOT_TOKEN` / `ADMIN_ALERT_CHAT_ID` | Optional: a bot+chat where YOU receive failure alerts |
 
@@ -227,7 +228,9 @@ under a shared queue. Bounded concurrency buys substantial headroom before that 
   would then also gain browser-bound state (cookie/PKCE) as CSRF hardening.
 - Portal client tokens live in `localStorage` with a 30-day TTL; on the sensitive
   Telegram-connect route the client's active status is re-checked every request.
-- Telegram: text messages only (voice/photos get a polite "text only" reply).
+- Telegram: text and voice notes. Voice is transcribed via OpenAI Whisper (set
+  `OPENAI_API_KEY`) and the reply echoes what was heard; photos/other media get a
+  polite "text or voice only" reply. Without the key, voice asks the client to type.
 - Calendar: the client's primary Google calendar.
 - Deleting a client with audit history is blocked (disable instead) until an explicit
   archival flow exists.

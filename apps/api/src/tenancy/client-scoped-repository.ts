@@ -245,6 +245,21 @@ export class ClientScopedRepository {
     return this.prisma.message.create({ data: { ...data, clientId: this.clientId } });
   }
 
+  /**
+   * True if an inbound message for this Telegram update_id is already stored.
+   * The unique(clientId, telegramUpdateId) index is the definitive dedup, but
+   * this lets a caller skip expensive work (e.g. voice transcription) on a
+   * webhook redelivery BEFORE paying for it — safe because updates for one
+   * client are processed serially, so the winning row is committed first.
+   */
+  async hasInboundForUpdate(telegramUpdateId: bigint): Promise<boolean> {
+    const existing = await this.prisma.message.findFirst({
+      where: { clientId: this.clientId, telegramUpdateId },
+      select: { id: true },
+    });
+    return existing !== null;
+  }
+
   // ── Audit log ──────────────────────────────────────────────────────────────
 
   async writeAudit(entry: {

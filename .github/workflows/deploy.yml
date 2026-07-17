@@ -178,6 +178,9 @@ jobs:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional — voice transcription (Whisper). Unset renders empty and
+          # voice stays off, matching the env schema's optionality.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           # Default dashboard login if the secrets aren't set (override anytime
@@ -200,6 +203,7 @@ jobs:
           sed -i "s|__ENCRYPTION_KEY__|$(esc "$ENCRYPTION_KEY")|g" .env.rendered
           sed -i "s|__JWT_SECRET__|$(esc "$JWT_SECRET")|g" .env.rendered
           sed -i "s|__ANTHROPIC_API_KEY__|$(esc "$ANTHROPIC_API_KEY")|g" .env.rendered
+          sed -i "s|__OPENAI_API_KEY__|$(esc "$OPENAI_API_KEY")|g" .env.rendered
           sed -i "s|__GOOGLE_CLIENT_ID__|$(esc "$GOOGLE_CLIENT_ID")|g" .env.rendered
           sed -i "s|__GOOGLE_CLIENT_SECRET__|$(esc "$GOOGLE_CLIENT_SECRET")|g" .env.rendered
           sed -i "s|__ADMIN_EMAIL__|$(esc "$ADMIN_EMAIL")|g" .env.rendered

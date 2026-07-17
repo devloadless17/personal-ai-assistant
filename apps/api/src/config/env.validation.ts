@@ -32,6 +32,11 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-opus-4-8'),
 
+  // Voice notes — Whisper speech-to-text (Claude has no audio API). Optional:
+  // when unset, the bot politely asks clients to type instead of recording.
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_TRANSCRIBE_MODEL: z.string().default('gpt-4o-mini-transcribe'),
+
   // Milestone 4+
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),

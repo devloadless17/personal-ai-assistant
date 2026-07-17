@@ -3,10 +3,15 @@ import type { Client } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { AgentService } from '../../agent/agent.service';
 import { CryptoService } from '../../crypto/crypto.service';
+import { OpenAiTranscriptionService } from '../openai/openai-transcription.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenancyService } from '../../tenancy/tenancy.service';
 import { TelegramService } from './telegram.service';
 import type { TelegramUpdate } from './telegram.types';
+
+/** Voice notes longer than this are refused — keeps transcription cost/latency
+ * bounded and nudges clients toward short, actionable requests. */
+const MAX_VOICE_SECONDS = 300;
 
 /**
  * Processes Telegram updates AFTER the webhook has fast-acked.
@@ -34,6 +39,7 @@ export class TelegramUpdateProcessor {
     private readonly agent: AgentService,
     private readonly telegram: TelegramService,
     private readonly crypto: CryptoService,
+    private readonly transcription: OpenAiTranscriptionService,
   ) {}
 
   /** Fire-and-forget from the controller; work is chained per client. */
@@ -87,7 +93,9 @@ export class TelegramUpdateProcessor {
         this.logger.warn(
           `Client ${client.id}: chat ${chatId} tried to bind without a valid code — refused`,
         );
-        if (msg.text) {
+        // Nudge on any real content (text OR a voice/audio note) — a client who
+        // opens a fresh bot and records a voice note should not get silence.
+        if (msg.text || msg.voice || msg.audio) {
           await this.telegram.sendMessage(
             botToken,
             chatId,
@@ -117,24 +125,33 @@ export class TelegramUpdateProcessor {
       return;
     }
 
-    if (!msg.text) {
-      await this.telegram.sendMessage(
-        botToken,
-        chatId,
-        'I can only read text messages for now — please type your request.',
-      );
+    const repo = this.tenancy.repoFor(client.id);
+    const updateId = BigInt(update.update_id);
+
+    // ── Early dedup: skip a webhook redelivery BEFORE doing expensive work.
+    // Updates for one client run serially (the per-client chain), so the first
+    // copy's inbound row is committed before a redelivery reaches this check —
+    // this stops a duplicate voice note from being re-downloaded and re-billed
+    // for transcription. The unique constraint below is still the backstop.
+    if (await repo.hasInboundForUpdate(updateId)) {
+      this.logger.log(`Duplicate update ${update.update_id} for client ${client.id} skipped`);
       return;
     }
 
-    const repo = this.tenancy.repoFor(client.id);
+    // Resolve the request to text: typed text passes through; a voice note is
+    // transcribed first. A null return means we already told the client why we
+    // couldn't proceed (unsupported type, transcription off, failure) — stop.
+    const wasVoice = Boolean(msg.voice ?? msg.audio);
+    const text = await this.resolveText(botToken, chatId, msg);
+    if (text === null) return;
 
-    // ── Dedup via unique(clientId, telegramUpdateId): a redelivery hits
-    // P2002 and is skipped — double-processing is impossible.
+    // ── Dedup backstop via unique(clientId, telegramUpdateId): if a redelivery
+    // raced past the check above (e.g. multi-instance), P2002 skips it here.
     try {
       await repo.saveMessage({
         direction: 'inbound',
-        content: msg.text,
-        telegramUpdateId: BigInt(update.update_id),
+        content: text,
+        telegramUpdateId: updateId,
       });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -145,6 +162,8 @@ export class TelegramUpdateProcessor {
     }
 
     // Show "typing…" while the agent works — makes multi-tool turns feel live.
+    // (Telegram's indicator expires after ~5s, so this also refreshes the one
+    // resolveText showed during voice transcription — not a redundant call.)
     await this.telegram.sendTyping(botToken, chatId);
 
     let reply: string;
@@ -157,8 +176,89 @@ export class TelegramUpdateProcessor {
       reply = 'Sorry — that didn’t go through on my side. Nothing was changed. Please try again.';
     }
 
-    await repo.saveMessage({ direction: 'outbound', content: reply });
-    await this.telegram.sendMessage(botToken, chatId, reply);
+    // Echo-then-act: for voice, prepend what we heard so a mis-hearing is
+    // obvious to the client immediately. Store exactly what we sent.
+    const outbound = wasVoice ? `🎙️ I heard: “${text}”\n\n${reply}` : reply;
+    await repo.saveMessage({ direction: 'outbound', content: outbound });
+    await this.telegram.sendMessage(botToken, chatId, outbound);
+  }
+
+  /**
+   * Turns an inbound message into the text the agent should act on.
+   * - text → returned as-is.
+   * - voice/audio → downloaded from Telegram and transcribed.
+   * - anything else → the client is told we only read text/voice.
+   *
+   * Returns null when the request can't proceed AND the client has already been
+   * told why (so the caller just stops). Never silently drops a message.
+   */
+  private async resolveText(
+    botToken: string,
+    chatId: string,
+    msg: NonNullable<TelegramUpdate['message']>,
+  ): Promise<string | null> {
+    if (msg.text) return msg.text;
+
+    const media = msg.voice ?? msg.audio;
+    if (!media) {
+      await this.telegram.sendMessage(
+        botToken,
+        chatId,
+        'I can only read text and voice messages for now — please type or record your request.',
+      );
+      return null;
+    }
+
+    if (!this.transcription.isConfigured) {
+      await this.telegram.sendMessage(
+        botToken,
+        chatId,
+        'Voice messages aren’t set up yet — please type your request for now.',
+      );
+      return null;
+    }
+
+    if (media.duration > MAX_VOICE_SECONDS) {
+      await this.telegram.sendMessage(
+        botToken,
+        chatId,
+        'That voice note is a bit long for me — please keep it under 5 minutes, or type your request.',
+      );
+      return null;
+    }
+
+    // Transcription can take a moment — show the client we're working on it.
+    await this.telegram.sendTyping(botToken, chatId);
+    try {
+      const file = await this.telegram.getFile(botToken, media.file_id);
+      const audio = await this.telegram.downloadFile(botToken, file.file_path);
+      // Whisper detects the format from the extension. Take Telegram's REAL one
+      // (e.g. "voice/file_5.oga") rather than guessing — a forwarded m4a/ogg
+      // audio would otherwise be mislabelled .mp3 and rejected. Fall back per
+      // message type only when the path carries no usable extension.
+      const pathExt = file.file_path.split('.').pop()?.toLowerCase();
+      const ext = pathExt && /^[a-z0-9]{2,4}$/.test(pathExt) ? pathExt : msg.voice ? 'oga' : 'mp3';
+      const transcript = await this.transcription.transcribe(audio, `audio.${ext}`);
+      if (!transcript) {
+        await this.telegram.sendMessage(
+          botToken,
+          chatId,
+          'I couldn’t make out any words in that voice note — could you try again?',
+        );
+        return null;
+      }
+      return transcript;
+    } catch (err) {
+      this.logger.error(
+        `Transcription failed for chat ${chatId}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+      await this.telegram.sendMessage(
+        botToken,
+        chatId,
+        'Sorry — I couldn’t process that voice note on my side. Nothing was changed. Please try again or type it.',
+      );
+      return null;
+    }
   }
 
   /** Extract the payload from a "/start <code>" message (Telegram deep link). */

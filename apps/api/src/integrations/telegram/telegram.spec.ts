@@ -10,6 +10,7 @@ import type { PrismaService } from '../../prisma/prisma.service';
 import type { TenancyService } from '../../tenancy/tenancy.service';
 import type { AgentService } from '../../agent/agent.service';
 import type { ClientScopedRepository } from '../../tenancy/client-scoped-repository';
+import type { OpenAiTranscriptionService } from '../openai/openai-transcription.service';
 
 // A realistic cuid — the controller rejects non-cuid ids before any DB work.
 const CID = 'ckabc123def456ghi789jkl01';
@@ -43,14 +44,20 @@ function makeUpdate(overrides?: {
   chatId?: number;
   text?: string;
   updateId?: number;
+  voice?: { file_id?: string; duration?: number };
 }): TelegramUpdate {
+  const voice = overrides?.voice
+    ? { file_id: overrides.voice.file_id ?? 'file-abc', duration: overrides.voice.duration ?? 5 }
+    : undefined;
   return {
     update_id: overrides?.updateId ?? 1,
     message: {
       message_id: 10,
       chat: { id: overrides?.chatId ?? 777, type: 'private' },
       from: { id: 5, is_bot: false },
-      text: overrides?.text ?? 'hello',
+      // A voice update carries no text.
+      text: voice ? undefined : (overrides?.text ?? 'hello'),
+      voice,
       date: 1752600000,
     },
   };
@@ -109,16 +116,22 @@ describe('TelegramController — webhook authenticity', () => {
 });
 
 describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
-  function makeProcessor(client: Client): {
+  function makeProcessor(
+    client: Client,
+    opts?: { transcript?: string; transcribeConfigured?: boolean },
+  ): {
     processor: TelegramUpdateProcessor;
     sent: string[];
     saveMessage: jest.Mock;
     respond: jest.Mock;
+    transcribe: jest.Mock;
+    hasInboundForUpdate: jest.Mock;
   } {
     const sent: string[] = [];
     const saveMessage = jest.fn().mockResolvedValue({});
     const respond = jest.fn().mockResolvedValue('the reply');
-    const repo = { saveMessage } as unknown as ClientScopedRepository;
+    const hasInboundForUpdate = jest.fn().mockResolvedValue(false);
+    const repo = { saveMessage, hasInboundForUpdate } as unknown as ClientScopedRepository;
     const prisma = {
       client: { update: jest.fn().mockResolvedValue(client) },
     } as unknown as PrismaService;
@@ -134,9 +147,25 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
         return Promise.resolve();
       }),
       sendTyping: jest.fn().mockResolvedValue(undefined),
+      getFile: jest.fn().mockResolvedValue({ file_path: 'voice/file_1.oga' }),
+      downloadFile: jest.fn().mockResolvedValue(Buffer.from('audio-bytes')),
     } as unknown as TelegramService;
-    const processor = new TelegramUpdateProcessor(prisma, tenancy, agent, telegram, fakeCrypto);
-    return { processor, sent, saveMessage, respond };
+    const transcribe = jest.fn().mockResolvedValue(opts?.transcript ?? 'add a task to call the bank');
+    const transcription = {
+      get isConfigured() {
+        return opts?.transcribeConfigured ?? true;
+      },
+      transcribe,
+    } as unknown as OpenAiTranscriptionService;
+    const processor = new TelegramUpdateProcessor(
+      prisma,
+      tenancy,
+      agent,
+      telegram,
+      fakeCrypto,
+      transcription,
+    );
+    return { processor, sent, saveMessage, respond, transcribe, hasInboundForUpdate };
   }
 
   async function flush(processor: TelegramUpdateProcessor, clientId: string): Promise<void> {
@@ -184,6 +213,82 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
       expect.objectContaining({ direction: 'outbound', content: 'the reply' }),
     );
     expect(sent).toEqual(['the reply']);
+  });
+
+  it('transcribes a voice note, saves the transcript, runs the agent, and echoes what it heard', async () => {
+    const { processor, sent, saveMessage, respond, transcribe } = makeProcessor(CLIENT, {
+      transcript: 'add a task to call the bank',
+    });
+    processor.enqueue(CLIENT, makeUpdate({ voice: {} }));
+    await flush(processor, CLIENT.id);
+
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    // Filename extension is derived from Telegram's real file_path (…/file_1.oga),
+    // not guessed — so Whisper gets the correct format hint.
+    expect(transcribe).toHaveBeenCalledWith(expect.any(Buffer), 'audio.oga');
+    // The transcript is stored as the inbound user turn (dedup key preserved).
+    expect(saveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        direction: 'inbound',
+        content: 'add a task to call the bank',
+        telegramUpdateId: BigInt(1),
+      }),
+    );
+    expect(respond).toHaveBeenCalledTimes(1);
+    // Outbound echoes the transcript, then the agent reply — stored == sent.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('I heard');
+    expect(sent[0]).toContain('add a task to call the bank');
+    expect(sent[0]).toContain('the reply');
+    expect(saveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ direction: 'outbound', content: sent[0] }),
+    );
+  });
+
+  it('asks the client to type when transcription is not configured, without running the agent', async () => {
+    const { processor, sent, respond, transcribe } = makeProcessor(CLIENT, {
+      transcribeConfigured: false,
+    });
+    processor.enqueue(CLIENT, makeUpdate({ voice: {} }));
+    await flush(processor, CLIENT.id);
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('aren’t set up');
+  });
+
+  it('refuses an over-long voice note without transcribing or running the agent', async () => {
+    const { processor, sent, respond, transcribe } = makeProcessor(CLIENT);
+    processor.enqueue(CLIENT, makeUpdate({ voice: { duration: 600 } }));
+    await flush(processor, CLIENT.id);
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent[0]).toContain('under 5 minutes');
+  });
+
+  it('replies honestly when transcription fails, without running the agent', async () => {
+    const { processor, sent, respond, transcribe } = makeProcessor(CLIENT);
+    transcribe.mockRejectedValueOnce(new Error('whisper down'));
+    processor.enqueue(CLIENT, makeUpdate({ voice: {} }));
+    await flush(processor, CLIENT.id);
+
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('couldn’t process that voice note');
+  });
+
+  it('skips a redelivered voice note BEFORE transcribing (early dedup pre-check)', async () => {
+    const { processor, sent, respond, transcribe, hasInboundForUpdate } = makeProcessor(CLIENT);
+    // The first copy already committed its inbound row → pre-check sees it.
+    hasInboundForUpdate.mockResolvedValueOnce(true);
+    processor.enqueue(CLIENT, makeUpdate({ voice: {} }));
+    await flush(processor, CLIENT.id);
+
+    expect(transcribe).not.toHaveBeenCalled(); // no paid transcription on a dupe
+    expect(respond).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
   });
 
   it('skips duplicate updates (unique-constraint hit) without running the agent', async () => {
