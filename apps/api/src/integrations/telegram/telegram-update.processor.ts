@@ -13,6 +13,22 @@ import type { TelegramUpdate } from './telegram.types';
  * bounded and nudges clients toward short, actionable requests. */
 const MAX_VOICE_SECONDS = 300;
 
+/** Extensions OpenAI's transcription endpoint accepts. Note: it takes `ogg`
+ * but NOT `oga`, even though Telegram voice notes (Opus-in-OGG) arrive with a
+ * `.oga` path — so `oga` is normalized to `ogg` below. */
+const OPENAI_AUDIO_EXTS = new Set(['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'ogg', 'wav', 'webm']);
+
+/**
+ * The filename extension to hand OpenAI, derived from Telegram's real file_path
+ * (which carries the true container). Normalizes the `.oga` alias to `.ogg`,
+ * and falls back per message type when the path has no OpenAI-accepted one.
+ */
+function audioExtension(filePath: string, isVoice: boolean): string {
+  let ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  if (ext === 'oga') ext = 'ogg';
+  return OPENAI_AUDIO_EXTS.has(ext) ? ext : isVoice ? 'ogg' : 'mp3';
+}
+
 /**
  * Processes Telegram updates AFTER the webhook has fast-acked.
  *
@@ -232,13 +248,10 @@ export class TelegramUpdateProcessor {
     try {
       const file = await this.telegram.getFile(botToken, media.file_id);
       const audio = await this.telegram.downloadFile(botToken, file.file_path);
-      // Whisper detects the format from the extension. Take Telegram's REAL one
-      // (e.g. "voice/file_5.oga") rather than guessing — a forwarded m4a/ogg
-      // audio would otherwise be mislabelled .mp3 and rejected. Fall back per
-      // message type only when the path carries no usable extension.
-      const pathExt = file.file_path.split('.').pop()?.toLowerCase();
-      const ext = pathExt && /^[a-z0-9]{2,4}$/.test(pathExt) ? pathExt : msg.voice ? 'oga' : 'mp3';
-      const transcript = await this.transcription.transcribe(audio, `audio.${ext}`);
+      const transcript = await this.transcription.transcribe(
+        audio,
+        `audio.${audioExtension(file.file_path, Boolean(msg.voice))}`,
+      );
       if (!transcript) {
         await this.telegram.sendMessage(
           botToken,

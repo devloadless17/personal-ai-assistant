@@ -223,9 +223,9 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
     await flush(processor, CLIENT.id);
 
     expect(transcribe).toHaveBeenCalledTimes(1);
-    // Filename extension is derived from Telegram's real file_path (…/file_1.oga),
-    // not guessed — so Whisper gets the correct format hint.
-    expect(transcribe).toHaveBeenCalledWith(expect.any(Buffer), 'audio.oga');
+    // Telegram voice path is …/file_1.oga, but OpenAI accepts `ogg` not `oga`
+    // for the same Opus-in-OGG container — the extension must be normalized.
+    expect(transcribe).toHaveBeenCalledWith(expect.any(Buffer), 'audio.ogg');
     // The transcript is stored as the inbound user turn (dedup key preserved).
     expect(saveMessage).toHaveBeenCalledWith(
       expect.objectContaining({
