@@ -128,7 +128,7 @@ export const createCalendarEvent = defineTool({
       .array(z.string().email())
       .max(50)
       .optional()
-      .describe('Guest email addresses to add to the event (only ones the client explicitly named).'),
+      .describe('Guest email addresses to add to the event — only ones the client explicitly gave you; never invent or guess an address.'),
     send_invites: z
       .boolean()
       .optional()
@@ -241,7 +241,7 @@ export const updateCalendarEvent = defineTool({
       .array(z.string().email())
       .max(50)
       .optional()
-      .describe('Replace the full guest list with these emails (only ones the client named).'),
+      .describe('Replace the full guest list with these emails — only ones the client explicitly gave you; never invent or guess an address.'),
     send_invites: z
       .boolean()
       .optional()

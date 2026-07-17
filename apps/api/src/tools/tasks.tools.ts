@@ -142,7 +142,7 @@ export const getTasks = defineTool({
 export const createTask = defineTool({
   name: 'create_task',
   description:
-    "Create a task or reminder in the client's task list (NOT on the calendar — calendar events are separate). To send a Telegram reminder, use reminder_minutes_before (e.g. 15 = ping 15 min before due) — this respects the client's preferred lead time — or reminder_at for an exact time.",
+    "Create a task or reminder in the client's task list (NOT on the calendar — calendar events are separate). To send a Telegram reminder, use reminder_minutes_before (e.g. 15 = ping 15 min before due) — this respects the client's preferred lead time — or reminder_at for an exact time. When the client asks to be reminded, you MUST set reminder_at or reminder_minutes_before — a due time alone does not send a ping.",
   schema: z.object({
     title: z.string().min(1).max(500).describe('Short task title.'),
     type: z.enum(['task', 'reminder']).optional().describe('Default: task.'),

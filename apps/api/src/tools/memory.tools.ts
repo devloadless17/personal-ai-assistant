@@ -34,7 +34,7 @@ export const getProfile = defineTool({
 export const saveMemory = defineTool({
   name: 'save_memory',
   description:
-    'Durably remember a preference or fact about the client (e.g. "assistant_language: Arabic", "prefers_morning_meetings: true"). Overwrites the key if it exists. Use short snake_case keys. Set category: profile (who they are — job, location), preference (how they like things), or longterm (goals/projects/facts). For reminder lead time or the daily-summary hour, use set_reminder_preference instead.',
+    'Durably remember a preference or fact about the client (e.g. "assistant_language: Arabic", "prefers_morning_meetings: true"). Use SPARINGLY — only when the client explicitly asks you to remember something, or states a genuinely durable, clearly important fact. Do not store passing chatter, one-off details, or anything uncertain. Overwrites the key if it exists. Use short snake_case keys. Set category: profile (who they are — job, location), preference (how they like things), or longterm (goals/projects/facts). For reminder lead time or the daily-summary hour, use set_reminder_preference instead.',
   schema: z.object({
     key: z
       .string()
