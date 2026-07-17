@@ -110,6 +110,14 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
+/** A single message in a client's assistant conversation (admin view). */
+export interface ConversationMessage {
+  id: string;
+  direction: "inbound" | "outbound";
+  content: string;
+  createdAt: string;
+}
+
 /**
  * Cursor-paginated list envelope — no endpoint ever returns "all rows".
  * Cursors are (createdAt, id) pairs: `id` is the tiebreaker so bursts of

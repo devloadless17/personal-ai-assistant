@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SetupTab } from "@/components/client-setup-tab";
 import { AuditTab } from "@/components/client-audit-tab";
+import { ConversationTab } from "@/components/client-conversation-tab";
 
 interface Usage {
   messagesIn: number;
@@ -99,10 +100,14 @@ export default function ClientDetailPage({ params }: { params: Promise<{ id: str
       <Tabs defaultValue="setup">
         <TabsList>
           <TabsTrigger value="setup">Setup</TabsTrigger>
+          <TabsTrigger value="conversation">Conversation</TabsTrigger>
           <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
         <TabsContent value="setup" className="pt-4">
           <SetupTab client={client} onChanged={load} />
+        </TabsContent>
+        <TabsContent value="conversation" className="pt-4">
+          <ConversationTab clientId={client.id} />
         </TabsContent>
         <TabsContent value="audit" className="pt-4">
           <AuditTab clientId={client.id} />

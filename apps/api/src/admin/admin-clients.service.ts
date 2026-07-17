@@ -5,7 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Client, Prisma } from '@prisma/client';
-import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
+import type {
+  AuditLogEntry,
+  ClientSummary,
+  ConversationMessage,
+  Paginated,
+} from '@assistant/shared';
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { TelegramConnectionService } from '../integrations/telegram/telegram-connection.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -173,6 +178,44 @@ export class AdminClientsService {
         input: r.input,
         result: r.result,
         success: r.success,
+        createdAt: r.createdAt.toISOString(),
+      })),
+      nextCursor:
+        rows.length > limit && last ? `${last.createdAt.toISOString()}|${last.id}` : null,
+    };
+  }
+
+  /** Cursor-paginated conversation history (newest first) for a client — the
+   * admin's window into how clients actually talk to the assistant, to improve
+   * it. Same (createdAt, id) keyset pattern as the audit log. */
+  async conversation(
+    id: string,
+    opts: { cursor?: string; limit?: number },
+  ): Promise<Paginated<ConversationMessage>> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    const where: Prisma.MessageWhereInput = { clientId: id };
+    if (opts.cursor) {
+      const [ts, cid] = opts.cursor.split('|');
+      if (!ts || !cid || Number.isNaN(Date.parse(ts))) {
+        throw new BadRequestException('Malformed cursor');
+      }
+      where.OR = [
+        { createdAt: { lt: new Date(ts) } },
+        { createdAt: new Date(ts), id: { lt: cid } },
+      ];
+    }
+    const rows = await this.prisma.message.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+    });
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      items: page.map((r) => ({
+        id: r.id,
+        direction: r.direction,
+        content: r.content,
         createdAt: r.createdAt.toISOString(),
       })),
       nextCursor:

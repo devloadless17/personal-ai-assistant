@@ -12,7 +12,12 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
-import type { AuditLogEntry, ClientSummary, Paginated } from '@assistant/shared';
+import type {
+  AuditLogEntry,
+  ClientSummary,
+  ConversationMessage,
+  Paginated,
+} from '@assistant/shared';
 import { JobsDiagnosticsService, type JobsDiagnostics } from '../jobs/jobs-diagnostics.service';
 import { AdminAuthGuard } from './admin-auth.guard';
 import { AdminAuthService } from './admin-auth.service';
@@ -136,6 +141,17 @@ export class AdminController {
       limit: limit ? Number(limit) : undefined,
       success: success === undefined ? undefined : success === 'true',
     });
+  }
+
+  /** Super-admin view of a client's assistant conversation (to improve the AI). */
+  @UseGuards(AdminAuthGuard)
+  @Get('clients/:id/messages')
+  async messages(
+    @Param('id') id: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ): Promise<Paginated<ConversationMessage>> {
+    return this.clients.conversation(id, { cursor, limit: limit ? Number(limit) : undefined });
   }
 
   @UseGuards(AdminAuthGuard)
