@@ -13,10 +13,18 @@ const CLIENT = { id: 'c1', timezone: 'UTC', name: 'T', assistantName: 'A' } as C
 function makeGateway(
   existing: CalendarEvent[],
   freeSlots: { start: Date; end: Date }[] = [],
-): CalendarGateway & { created: CalendarEvent[] } {
+): CalendarGateway & {
+  created: CalendarEvent[];
+  updated: { id: string; params: Partial<CalendarEvent> }[];
+  deleted: string[];
+} {
   const created: CalendarEvent[] = [];
+  const updated: { id: string; params: Partial<CalendarEvent> }[] = [];
+  const deleted: string[] = [];
   return {
     created,
+    updated,
+    deleted,
     listEvents: jest.fn().mockResolvedValue(existing),
     getEvent: jest
       .fn()
@@ -30,12 +38,23 @@ function makeGateway(
           return Promise.resolve(e);
         },
       ),
-    updateEvent: jest
-      .fn()
-      .mockImplementation((id: string, p: Partial<CalendarEvent>) =>
-        Promise.resolve({ id, title: 'x', start: new Date(), end: new Date(), allDay: false, ...p }),
-      ),
-    deleteEvent: jest.fn().mockResolvedValue(undefined),
+    updateEvent: jest.fn().mockImplementation((id: string, p: Partial<CalendarEvent>) => {
+      updated.push({ id, params: p });
+      const src = existing.find((e) => e.id === id);
+      return Promise.resolve({
+        id,
+        title: p.title ?? src?.title ?? 'x',
+        start: p.start ?? src?.start ?? new Date(),
+        end: p.end ?? src?.end ?? new Date(),
+        allDay: false,
+        seriesId: src?.seriesId,
+        recurring: src?.recurring,
+      });
+    }),
+    deleteEvent: jest.fn().mockImplementation((id: string) => {
+      deleted.push(id);
+      return Promise.resolve(undefined);
+    }),
     findConflicts: jest
       .fn()
       .mockImplementation((start: Date, end: Date, exclude?: string) =>
@@ -268,6 +287,64 @@ describe('calendar tools — conflict gating & honesty', () => {
     // Companion reminder is itself recurring, anchored to the ping time.
     expect(created[0]?.recurrenceFreq).toBe('WEEKLY');
     expect(created[0]?.recurrenceWeekdays).toEqual([6]);
+  });
+
+  it('updating a recurring event changes the WHOLE series (targets the master id)', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260719T160000Z',
+      seriesId: 'evt',
+      title: 'Sales sync',
+      start: new Date('2026-07-19T16:00:00Z'),
+      end: new Date('2026-07-19T17:00:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const res = await updateCalendarEvent.execute(
+      { event_id: 'evt_20260719T160000Z', end: new Date('2026-07-19T18:00:00Z') },
+      ctxWith(gw),
+    );
+    // Patched the SERIES MASTER, not the single instance.
+    expect(gw.updated[0]?.id).toBe('evt');
+    expect(res).toContain('whole recurring series');
+  });
+
+  it('a single-instance edit (apply_to:this_event) targets only that instance', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260719T160000Z',
+      seriesId: 'evt',
+      title: 'Sales sync',
+      start: new Date('2026-07-19T16:00:00Z'),
+      end: new Date('2026-07-19T17:00:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    await updateCalendarEvent.execute(
+      {
+        event_id: 'evt_20260719T160000Z',
+        apply_to: 'this_event',
+        end: new Date('2026-07-19T18:00:00Z'),
+      },
+      ctxWith(gw),
+    );
+    expect(gw.updated[0]?.id).toBe('evt_20260719T160000Z'); // the instance, not master
+  });
+
+  it('cancelling a recurring event deletes the WHOLE series by default', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260719T160000Z',
+      seriesId: 'evt',
+      title: 'Sales sync',
+      start: new Date('2026-07-19T16:00:00Z'),
+      end: new Date('2026-07-19T17:00:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const res = await deleteCalendarEvent.execute({ event_id: 'evt_20260719T160000Z' }, ctxWith(gw));
+    expect(gw.deleted).toEqual(['evt']); // the master series, not the instance
+    expect(res).toContain('whole recurring series');
   });
 
   it('deleting a recurring instance clears the companion reminder by SERIES id', async () => {

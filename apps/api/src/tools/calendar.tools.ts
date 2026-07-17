@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { defineTool } from './tool.types';
 import type { CalendarEvent, ToolContext } from './tool.types';
 import { repeatBaseSchema, repeatToFields, repeatToRRule } from './tasks.tools';
-import { formatInTz, isoDateTime } from './time';
+import { formatInTz, isoDateTime, isoInTz, withClientOffset } from './time';
 
 const NOT_CONNECTED =
   'ERROR: Google Calendar is not connected for this client yet. Tell the client their calendar isn\'t linked and that the administrator can send them a connection link. Do NOT claim any calendar action succeeded.';
@@ -229,9 +229,15 @@ export const createCalendarEvent = defineTool({
 export const updateCalendarEvent = defineTool({
   name: 'update_calendar_event',
   description:
-    'Update/move/rename an existing calendar event. Get the event id from get_calendar_events first. Moving an event re-checks conflicts unless allow_conflict is true.',
+    'Update/move/rename an existing calendar event. Get the event id from get_calendar_events first. For a RECURRING event this changes the WHOLE series by default (all occurrences) — pass apply_to:"this_event" only when the client says to change just one occurrence. Moving re-checks conflicts unless allow_conflict is true.',
   schema: z.object({
     event_id: z.string().min(1).describe('The event id from get_calendar_events.'),
+    apply_to: z
+      .enum(['series', 'this_event'])
+      .optional()
+      .describe(
+        'For a recurring event: "series" (DEFAULT) changes every occurrence; "this_event" changes only the single instance. Use this_event ONLY when the client says "just this one / only next X".',
+      ),
     title: z.string().min(1).max(300).optional(),
     start: isoDateTime.optional().describe('New start (ISO 8601). Provide end too when moving.'),
     end: isoDateTime.optional().describe('New end (ISO 8601).'),
@@ -257,44 +263,67 @@ export const updateCalendarEvent = defineTool({
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
-    const { event_id, allow_conflict, reminder_minutes_before, start, end, attendees, send_invites, ...rest } =
+    const { event_id, apply_to, allow_conflict, reminder_minutes_before, start, end, attendees, send_invites, ...rest } =
       input;
+    const tz = ctx.client.timezone;
 
-    // A time change may set only start OR only end. To validate the ordering
-    // and re-check conflicts we need BOTH sides, so fetch the current event and
-    // fill in whichever side wasn't provided. Without this, a single-sided move
-    // ("push my 3pm to 4") would skip the conflict gate → silent double-book.
-    const timeChanging = start !== undefined || end !== undefined;
-    let effStart = start;
-    let effEnd = end;
-    if (timeChanging && (start === undefined || end === undefined)) {
-      const current = await ctx.calendar.getEvent(event_id);
-      if (!current) {
-        return `ERROR: no calendar event with id ${event_id} exists. Nothing was changed.`;
-      }
-      effStart = start ?? current.start;
-      effEnd = end ?? current.end;
+    // Fetch the current event once — needed to fill a single-sided time change
+    // AND to detect recurrence + resolve the SERIES master id.
+    const current = await ctx.calendar.getEvent(event_id);
+    if (!current) {
+      return `ERROR: no calendar event with id ${event_id} exists. Nothing was changed.`;
     }
+    // For a recurring event, default to updating the WHOLE series (the master),
+    // so a change like "make it 2 hours" applies to every occurrence — not just
+    // the one instance the id refers to. Only touch a single instance when the
+    // client explicitly asked ("just this one").
+    const applyToSeries = (current.recurring ?? false) && apply_to !== 'this_event';
+    const targetId = applyToSeries ? (current.seriesId ?? event_id) : event_id;
+
+    const timeChanging = start !== undefined || end !== undefined;
+    // Fill a single-sided time change from the current event so ordering +
+    // conflict checks have both sides.
+    const effStart = start ?? (timeChanging ? current.start : undefined);
+    const effEnd = end ?? (timeChanging ? current.end : undefined);
     if (effStart && effEnd && effEnd <= effStart) {
       return 'ERROR: end must be after start. Nothing was changed.';
     }
     if (timeChanging && effStart && effEnd && !allow_conflict) {
+      // Exclude the event's OWN occurrence (the instance id we're editing) so it
+      // doesn't flag itself as a clash.
       const conflicts = await conflictWarning(ctx, effStart, effEnd, event_id);
       if (conflicts) {
         return `CONFLICT — nothing was changed. The new time overlaps:\n${conflicts}\nAsk the client whether to pick another time or move anyway (then retry with allow_conflict=true).`;
       }
     }
-    const event = await ctx.calendar.updateEvent(event_id, {
+
+    // What start/end to write. For a SERIES time change, apply the new
+    // time-of-day + duration to the MASTER's own date, so every occurrence
+    // shifts to the new time and NO occurrences are dropped (patching the master
+    // with an instance's absolute date would re-anchor/prune the series).
+    let patchStart = start;
+    let patchEnd = end;
+    if (applyToSeries && timeChanging && effStart && effEnd) {
+      const master =
+        current.seriesId && current.seriesId !== current.id
+          ? ((await ctx.calendar.getEvent(current.seriesId)) ?? current)
+          : current;
+      const masterDate = isoInTz(master.start, tz).slice(0, 10); // YYYY-MM-DD (master's day)
+      const newTime = isoInTz(effStart, tz).slice(11, 19); // HH:MM:SS (requested time-of-day)
+      patchStart = new Date(withClientOffset(`${masterDate}T${newTime}`, tz));
+      patchEnd = new Date(patchStart.getTime() + (effEnd.getTime() - effStart.getTime()));
+    }
+
+    const event = await ctx.calendar.updateEvent(targetId, {
       ...rest,
-      start,
-      end,
+      start: patchStart,
+      end: patchEnd,
       ...(attendees !== undefined ? { attendees } : {}),
       ...(send_invites !== undefined ? { sendInvites: send_invites } : {}),
     });
 
-    // Keep the companion reminder correct. Resolve the SERIES master id so a
-    // recurring instance still matches its (series-keyed) companion.
-    const seriesId = event.seriesId ?? event_id;
+    // Keep the companion reminder correct, keyed on the SERIES master id.
+    const seriesId = event.seriesId ?? targetId;
     let reminderNote = '';
     let desiredLead: number | null | undefined;
     // Read the existing companion up front so a move can PRESERVE its recurrence.
@@ -339,16 +368,27 @@ export const updateCalendarEvent = defineTool({
           " (The event was updated, but I couldn't adjust its Telegram reminder — ask me to set it again.)";
       }
     }
-    return `Updated on calendar: ${renderEvent(event, ctx.client.timezone)}.${reminderNote}`;
+    const scopeNote = applyToSeries
+      ? ' — applied to the whole recurring series'
+      : current.recurring
+        ? ' — this occurrence only'
+        : '';
+    return `Updated on calendar: ${renderEvent(event, ctx.client.timezone)}${scopeNote}.${reminderNote}`;
   },
 });
 
 export const deleteCalendarEvent = defineTool({
   name: 'delete_calendar_event',
   description:
-    'Delete a calendar event. Only when the client explicitly asks to cancel/remove it. Get the event id from get_calendar_events first.',
+    'Delete a calendar event. Only when the client explicitly asks to cancel/remove it. Get the event id from get_calendar_events first. For a RECURRING event this cancels the WHOLE series by default — pass apply_to:"this_event" only when the client wants to cancel just one occurrence.',
   schema: z.object({
     event_id: z.string().min(1).describe('The event id from get_calendar_events.'),
+    apply_to: z
+      .enum(['series', 'this_event'])
+      .optional()
+      .describe(
+        'For a recurring event: "series" (DEFAULT) cancels every occurrence; "this_event" cancels only the one instance. Use this_event ONLY when the client says "just this one / only next X".',
+      ),
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
@@ -356,14 +396,23 @@ export const deleteCalendarEvent = defineTool({
     // gives a clean, quotable message instead of a raw Google 404/410.
     const existing = await ctx.calendar.getEvent(input.event_id);
     if (!existing) {
-      // Still clear any orphaned companion reminder (by series id), then report.
+      // Still clear any orphaned companion reminder, then report honestly.
       await ctx.repo.deleteEventReminders(input.event_id);
       return `ERROR: no calendar event with id ${input.event_id} exists (already removed?). Nothing to delete.`;
     }
-    await ctx.calendar.deleteEvent(input.event_id);
-    // Cancel the companion reminder keyed on the SERIES master id — otherwise a
-    // recurring meeting's reminder keeps firing forever after cancellation.
+    // For a recurring event, cancel the WHOLE series (the master) by default —
+    // deleting an instance id removes only that one occurrence. Only delete a
+    // single instance when the client explicitly asked.
+    const applyToSeries = (existing.recurring ?? false) && input.apply_to !== 'this_event';
+    const targetId = applyToSeries ? (existing.seriesId ?? input.event_id) : input.event_id;
+    await ctx.calendar.deleteEvent(targetId);
+    // Cancel the companion reminder keyed on the SERIES master id.
     await ctx.repo.deleteEventReminders(existing.seriesId ?? input.event_id);
-    return `Deleted calendar event: ${existing.title}.`;
+    const scope = applyToSeries
+      ? ' (whole recurring series)'
+      : existing.recurring
+        ? ' (this occurrence only)'
+        : '';
+    return `Deleted calendar event: ${existing.title}${scope}.`;
   },
 });
