@@ -84,13 +84,25 @@ export default function PortalPage() {
         </Button>
       </div>
 
-      <div className="flex gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <Badge variant={me.googleNeedsReauth ? "destructive" : me.googleConnected ? "default" : "outline"}>
           {me.googleNeedsReauth ? "Calendar — reconnect" : me.googleConnected ? "Calendar ✓" : "Calendar not linked"}
         </Badge>
         <Badge variant={me.telegramConnected ? "default" : "outline"}>
           {me.telegramConnected ? "Telegram ✓" : "Telegram being set up"}
         </Badge>
+        {(!me.googleConnected || me.googleNeedsReauth) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const { url } = await portalApi<{ url: string }>("/client/google/connect-url");
+              window.location.href = url;
+            }}
+          >
+            {me.googleNeedsReauth ? "Reconnect Google Calendar" : "Connect Google Calendar"}
+          </Button>
+        )}
       </div>
 
       <ChatOnTelegram me={me} />

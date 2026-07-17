@@ -155,6 +155,14 @@ export class ClientController {
     }));
   }
 
+  /** A consent-forcing URL to (re)connect the client's own Google Calendar —
+   * for the first-time/declined/revoked case. Login itself never forces consent. */
+  @UseGuards(ClientAuthGuard)
+  @Get('google/connect-url')
+  connectGoogle(@Req() req: ClientRequest): { url: string } {
+    return { url: this.google.buildConnectUrl(req.client.sub) };
+  }
+
   // ── Memory (what the assistant knows — the client can view/edit/forget it) ──
 
   @UseGuards(ClientAuthGuard)

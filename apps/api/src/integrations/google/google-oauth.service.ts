@@ -190,9 +190,16 @@ export class GoogleOAuthService {
       throw new Error('Too many pending logins — try again shortly.');
     }
     this.pendingLoginStates.set(state, Date.now() + 15 * 60_000);
+    // NO `prompt: 'consent'` — that would force the "grant access" screen on
+    // EVERY sign-in. Omitting it lets Google show consent ONLY when needed: the
+    // first authorization prompts + returns the refresh token (access_type
+    // offline), and every later sign-in — scopes already granted — returns
+    // silently, landing the client straight on their dashboard. A later
+    // reconnect (revoked grant) is handled by the consent-forcing connect flow.
+    // `include_granted_scopes` keeps prior grants intact across incremental auth.
     return oauth.generateAuthUrl({
       access_type: 'offline',
-      prompt: 'consent',
+      include_granted_scopes: true,
       scope: ['openid', 'email', ...SCOPES],
       state,
     });
