@@ -313,8 +313,13 @@ export class AgentService {
       } else {
         try {
           resultText = await tool.execute(parsed.data, ctx);
-          // Tools signal domain failures with an ERROR:/CONFLICT prefix.
-          success = !resultText.startsWith('ERROR:') && !resultText.startsWith('CONFLICT');
+          // Tools signal a NON-mutation with an ERROR:/CONFLICT/ALREADY EXISTS
+          // prefix — nothing was written, so it must not count as a success (else
+          // the honesty guards would trust a "Booked!" that didn't happen).
+          success =
+            !resultText.startsWith('ERROR:') &&
+            !resultText.startsWith('CONFLICT') &&
+            !resultText.startsWith('ALREADY EXISTS');
         } catch (err) {
           this.logger.error(
             `Tool ${use.name} threw for client ${ctx.client.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,

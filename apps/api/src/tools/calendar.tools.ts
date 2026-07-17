@@ -8,6 +8,7 @@ import {
   formatLeads,
   isoDateTime,
   isoInTz,
+  localWeekday,
   withClientOffset,
 } from './time';
 
@@ -132,6 +133,9 @@ async function armEventReminders(
   leads: number[],
   companionRec: CompanionRecurrence,
   pinnedZone?: string,
+  /** True when the meeting recurs but its pattern can't be auto-repeated for
+   * reminders (every-other-week + weekdays) — so the client is warned. */
+  recurrenceDropped = false,
 ): Promise<string> {
   // The zone a recurring companion is pinned to: the event's original zone when
   // preserved across a move, else the client's current zone at creation.
@@ -145,15 +149,30 @@ async function armEventReminders(
   let anyFailed = false;
   for (const lead of positive) {
     const firstAnchor = new Date(eventStart.getTime() - lead * 60_000);
-    const reminderAt = companionRec
+    // For a WEEKLY-on-specific-weekdays meeting, a lead that crosses local
+    // midnight puts the reminder on an EARLIER weekday than the meeting (e.g.
+    // "day before" a Monday meeting = Sunday). Recur the companion on the
+    // ANCHOR's weekday(s), shifted by the day-delta — otherwise nextOccurrence
+    // snaps every future ping back onto the meeting's weekday (wrong day/time).
+    let recForLead = companionRec;
+    if (companionRec && companionRec.recurrenceFreq === 'WEEKLY' && companionRec.recurrenceWeekdays.length > 0) {
+      const shift = (localWeekday(eventStart, zone) - localWeekday(firstAnchor, zone) + 7) % 7;
+      if (shift !== 0) {
+        recForLead = {
+          ...companionRec,
+          recurrenceWeekdays: companionRec.recurrenceWeekdays.map((w) => (((w - shift) % 7) + 7) % 7),
+        };
+      }
+    }
+    const reminderAt = recForLead
       ? firstFutureOccurrence(
           firstAnchor,
-          companionRec.recurrenceFreq,
-          companionRec.recurrenceInterval,
-          companionRec.recurrenceWeekdays,
+          recForLead.recurrenceFreq,
+          recForLead.recurrenceInterval,
+          recForLead.recurrenceWeekdays,
           zone,
           ctx.now,
-          companionRec.recurrenceUntil,
+          recForLead.recurrenceUntil,
         )
       : firstAnchor.getTime() > ctx.now.getTime()
         ? firstAnchor
@@ -168,8 +187,8 @@ async function armEventReminders(
         reminderLeadMinutes: lead,
         // Pin each companion to the event's zone so pings don't drift vs the
         // meeting when the client travels across a DST change.
-        ...(companionRec
-          ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: zone }
+        ...(recForLead
+          ? { ...recForLead, recurrenceAnchor: firstAnchor, recurrenceTimezone: zone }
           : {}),
       });
       armed.push(lead);
@@ -178,12 +197,17 @@ async function armEventReminders(
     }
   }
   if (armed.length === 0) {
-    return anyFailed
-      ? " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)"
-      : '';
+    if (anyFailed)
+      return " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)";
+    // Every lead was already in the past (the meeting is very soon) — say so
+    // instead of staying silent, so the client knows there's no ping coming.
+    return " (The meeting is sooner than your reminder time, so I didn't set a separate reminder.)";
   }
   const eachTime = companionRec ? ' each time' : '';
   let note = ` I'll remind you ${formatLeads(armed)} before${eachTime}.`;
+  if (recurrenceDropped)
+    note +=
+      " (Heads up: I can't auto-repeat a reminder for that meeting pattern, so it'll ping before the next one only — ask me to set later ones.)";
   if (anyFailed) note += " (One of the reminders couldn't be set — ask me to add it again.)";
   return note;
 }
@@ -314,12 +338,16 @@ export const createCalendarEvent = defineTool({
     // client's reminders — never dependent on the model remembering to ask).
     // Each lead → an independent companion ping.
     const leads = input.reminder_minutes_before ?? ctx.client.reminderLeads;
+    const companionRec = companionRecurrenceFrom(input.repeat);
     const reminderNote = await armEventReminders(
       ctx,
       event,
       input.start,
       leads,
-      companionRecurrenceFrom(input.repeat),
+      companionRec,
+      undefined,
+      // The meeting recurs but the reminder can't (every-other-week + weekdays).
+      Boolean(input.repeat) && companionRec === null,
     );
 
     let inviteNote = '';

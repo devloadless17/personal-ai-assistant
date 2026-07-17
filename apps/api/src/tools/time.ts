@@ -69,6 +69,27 @@ export function formatInTz(date: Date, timeZone: string): string {
   }).format(date);
 }
 
+/**
+ * A concise "when" for a reminder ping: just the time ("8:00 PM") if the event
+ * is on the SAME local day as `now`, else weekday + time ("Fri 8:00 PM"). Keeps
+ * pings short — no redundant full weekday+year the client is receiving right now.
+ */
+export function formatEventWhen(eventAt: Date, now: Date, timeZone: string): string {
+  const full = formatInTz(eventAt, timeZone); // "Fri, Jul 18 2026, 8:00 PM"
+  const time = full.split(', ').pop() ?? full; // "8:00 PM"
+  const sameDay =
+    isoInTz(eventAt, timeZone).slice(0, 10) === isoInTz(now, timeZone).slice(0, 10);
+  if (sameDay) return time;
+  const weekday = full.split(',')[0]; // "Fri"
+  return `${weekday} ${time}`;
+}
+
+/** The local weekday of `date` in `timeZone`: 0 = Sunday … 6 = Saturday. */
+export function localWeekday(date: Date, timeZone: string): number {
+  const ymd = isoInTz(date, timeZone).slice(0, 10);
+  return new Date(`${ymd}T00:00:00Z`).getUTCDay();
+}
+
 /** ISO 8601 with the client's local offset, e.g. "2026-07-18T15:00:00+03:00". */
 export function isoInTz(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat('en-CA', {

@@ -5,7 +5,7 @@ import { mapWithConcurrency } from '../common/concurrency';
 import { CryptoService } from '../crypto/crypto.service';
 import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { formatInTz, nextOccurrence } from '../tools/time';
+import { formatEventWhen, nextOccurrence } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
 
 /**
@@ -142,17 +142,30 @@ export class ReminderJob implements OnApplicationBootstrap {
       if (!botToken || !client.telegramChatId) {
         throw new Error('client has no bot token or bound chat');
       }
-      const when = task.dueAt ? ` (due ${formatInTz(task.dueAt, client.timezone)})` : '';
       // Safety net: the ping already prefixes "⏰ Reminder:", so strip a leading
       // "Reminder:"/"Reminder -" the model may have baked into the title (else it
       // reads as a doubled "⏰ Reminder: Reminder: Meeting"). Require an actual
       // separator so a real subject that just starts with the word — e.g.
       // "Reminder about taxes" — is left completely intact.
       const subject = task.title.replace(/^\s*reminders?\s*[:\-–]\s*/i, '').trim() || task.title;
+      const tz = client.timezone;
+      // reminderAt is set for any delivered reminder (the query filters
+      // reminderAt <= now); fall back to now defensively for the type-checker.
+      const reminderAtMs = task.reminderAt?.getTime() ?? now.getTime();
+      let suffix = '';
+      if (task.sourceEventId && task.reminderLeadMinutes && task.reminderLeadMinutes > 0) {
+        // Meeting reminder → tell the client WHEN the meeting is ("at 8:00 PM").
+        const eventAt = new Date(reminderAtMs + task.reminderLeadMinutes * 60_000);
+        suffix = ` at ${formatEventWhen(eventAt, now, tz)}`;
+      } else if (task.dueAt && task.dueAt.getTime() - reminderAtMs > 60_000) {
+        // A reminder set BEFORE a due time → show the due time. (When the ping
+        // fires AT its own time, dueAt == reminderAt → no redundant "(due …)".)
+        suffix = ` (due ${formatEventWhen(task.dueAt, now, tz)})`;
+      }
       await this.telegram.sendMessage(
         botToken,
         client.telegramChatId,
-        `⏰ Reminder: ${subject}${when}`,
+        `⏰ Reminder: ${subject}${suffix}`,
       );
       // Delivery CONFIRMED — recurring reminders roll forward to their next
       // occurrence; one-shots are marked permanently sent.

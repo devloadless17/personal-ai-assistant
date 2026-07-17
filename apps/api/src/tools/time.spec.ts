@@ -1,5 +1,7 @@
 import {
   firstFutureOccurrence,
+  formatEventWhen,
+  localWeekday,
   isOffsetlessIso,
   isoInTz,
   nextOccurrence,
@@ -141,5 +143,27 @@ describe('firstFutureOccurrence — arm a recurring reminder whose anchor is pas
     expect(
       new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(next as Date),
     ).toBe('Fri');
+  });
+});
+
+describe('formatEventWhen + localWeekday', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (iso: string): Date => new Date(withClientOffset(iso, TZ));
+
+  it('shows time-only when the event is on the same local day as now', () => {
+    const now = at('2026-07-18T09:00:00');
+    const eventAt = at('2026-07-18T20:00:00');
+    expect(formatEventWhen(eventAt, now, TZ)).toBe('8:00 PM');
+  });
+
+  it('shows weekday + time when the event is on a different local day', () => {
+    const now = at('2026-07-18T22:00:00'); // Sat night
+    const eventAt = at('2026-07-19T08:00:00'); // Sun morning
+    expect(formatEventWhen(eventAt, now, TZ)).toBe('Sun 8:00 AM');
+  });
+
+  it('localWeekday returns 0=Sun..6=Sat in the client zone', () => {
+    expect(localWeekday(at('2026-07-19T12:00:00'), TZ)).toBe(0); // Sunday
+    expect(localWeekday(at('2026-07-20T12:00:00'), TZ)).toBe(1); // Monday
   });
 });

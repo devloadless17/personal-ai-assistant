@@ -196,14 +196,6 @@ export class ClientScopedRepository {
 
   // ── Preferences ─────────────────────────────────────────────────────────────
 
-  /** Update the client's default reminder lead time (minutes before due). */
-  async setDefaultReminderMinutes(minutes: number): Promise<void> {
-    await this.prisma.client.update({
-      where: { id: this.clientId },
-      data: { defaultReminderMinutes: minutes },
-    });
-  }
-
   /** Update the client's daily-summary hour (0–23, their local time). */
   async setDailyBriefHour(hour: number): Promise<void> {
     await this.prisma.client.update({

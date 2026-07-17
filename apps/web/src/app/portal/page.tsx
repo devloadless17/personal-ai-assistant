@@ -620,7 +620,7 @@ function Preferences({ me, onChanged }: { me: ClientMe; onChanged: () => void | 
               >
                 {[15, 30, 45, 60, 90, 120, 180].map((m) => (
                   <option key={m} value={m}>
-                    {m < 60 ? `${m} minutes` : `${m / 60} hour${m >= 120 ? "s" : ""}${m % 60 ? " 30 min" : ""}`}
+                    {m < 60 ? `${m} minutes` : `${Math.floor(m / 60)} hour${m >= 120 ? "s" : ""}${m % 60 ? " 30 min" : ""}`}
                   </option>
                 ))}
               </select>

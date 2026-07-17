@@ -154,7 +154,7 @@ export const createTask = defineTool({
       .max(10080)
       .optional()
       .describe(
-        "Minutes before due_at to send a reminder. Prefer this. Use the client's default lead time unless they specify a different one for this task.",
+        'Minutes before due_at to send the reminder ping (e.g. 15 = ping 15 min before the due time). Use for a to-do that has a due time; use reminder_at instead when the client names the exact ping time.',
       ),
     reminder_at: isoDateTime
       .optional()

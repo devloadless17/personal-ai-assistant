@@ -206,6 +206,28 @@ describe('calendar tools — conflict gating & honesty', () => {
     expect(res).toContain('1 hour and 10 min before');
   });
 
+  it('a cross-midnight lead on a weekly meeting recurs the reminder on the ANCHOR weekday', async () => {
+    // Weekly Monday 08:00 meeting, "remind me the day before" (1440) → the ping
+    // must recur on SUNDAY, not snap back to Monday every week (the HIGH bug).
+    const gw = makeGateway([]);
+    const { ctx, created } = capturingCtx({ reminderLeads: [] }, gw);
+    await createCalendarEvent.execute(
+      {
+        title: "Team sync",
+        start: new Date("2026-07-20T08:00:00Z"), // Monday (UTC)
+        end: new Date("2026-07-20T09:00:00Z"),
+        repeat: { freq: "weekly", weekdays: [1] }, // Mon
+        reminder_minutes_before: [1440], // 1 day before
+      },
+      ctx,
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]?.recurrenceFreq).toBe("WEEKLY");
+    expect(created[0]?.recurrenceWeekdays).toEqual([0]); // Sunday, not Monday
+    // First ping = the Sunday before the first Monday.
+    expect(created[0]?.reminderAt).toEqual(new Date("2026-07-19T08:00:00Z"));
+  });
+
   it('a per-meeting reminder list overrides the default', async () => {
     const gw = makeGateway([]);
     const { ctx, created } = capturingCtx({ reminderLeads: [60, 10] }, gw);
