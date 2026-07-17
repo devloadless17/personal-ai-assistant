@@ -55,8 +55,10 @@ export class DailyBriefJob implements OnApplicationBootstrap {
   /** After any restart/redeploy, check briefs immediately — so a deploy landing
    * right at a client's brief hour doesn't skip that day's brief entirely. The
    * once-per-day claim keeps this from double-sending. */
-  async onApplicationBootstrap(): Promise<void> {
-    await this.tick();
+  onApplicationBootstrap(): void {
+    // Detached: don't let a boot catch-up (which reads Google) delay/block
+    // app.listen() + the health check. The cron runs it regardless.
+    void this.tick();
   }
 
   @Cron('*/10 * * * *')

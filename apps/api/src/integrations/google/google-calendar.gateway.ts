@@ -10,6 +10,11 @@ import type { CalendarEvent, CalendarGateway } from '../../tools/tool.types';
  * the Google Calendar app are always visible to the assistant, and conflict
  * checks run against the real calendar.
  */
+/** Hard cap on every Google API call. gaxios has NO default timeout, so a hung
+ * socket (no RST) would otherwise block the caller forever — in a cron job that
+ * wedges the `running` guard until process restart. */
+const GOOGLE_TIMEOUT_MS = 15_000;
+
 export class GoogleCalendarGateway implements CalendarGateway {
   private static readonly logger = new Logger(GoogleCalendarGateway.name);
   private readonly calendar: calendar_v3.Calendar;
@@ -27,14 +32,14 @@ export class GoogleCalendarGateway implements CalendarGateway {
    */
   async getUserTimezone(): Promise<string | null> {
     try {
-      const res = await this.calendar.settings.get({ setting: 'timezone' });
+      const res = await this.calendar.settings.get({ setting: 'timezone' }, { timeout: GOOGLE_TIMEOUT_MS });
       const tz = res.data.value?.trim();
       if (tz) return tz;
     } catch {
       // fall through to the calendars.get fallback
     }
     try {
-      const res = await this.calendar.calendars.get({ calendarId: 'primary' });
+      const res = await this.calendar.calendars.get({ calendarId: 'primary' }, { timeout: GOOGLE_TIMEOUT_MS });
       return res.data.timeZone?.trim() || null;
     } catch {
       return null;
@@ -57,7 +62,7 @@ export class GoogleCalendarGateway implements CalendarGateway {
         orderBy: 'startTime',
         maxResults: Math.min(limit - out.length, 250),
         pageToken,
-      });
+      }, { timeout: GOOGLE_TIMEOUT_MS });
       for (const e of res.data.items ?? []) {
         if (e.status !== 'cancelled') out.push(this.toEvent(e));
       }
@@ -69,7 +74,7 @@ export class GoogleCalendarGateway implements CalendarGateway {
 
   async getEvent(eventId: string): Promise<CalendarEvent | null> {
     try {
-      const res = await this.calendar.events.get({ calendarId: 'primary', eventId });
+      const res = await this.calendar.events.get({ calendarId: 'primary', eventId }, { timeout: GOOGLE_TIMEOUT_MS });
       if (res.data.status === 'cancelled') return null;
       return this.toEvent(res.data);
     } catch (err) {
@@ -110,7 +115,7 @@ export class GoogleCalendarGateway implements CalendarGateway {
           ? { recurrence: params.recurrence }
           : {}),
       },
-    });
+    }, { timeout: GOOGLE_TIMEOUT_MS });
     return this.toEvent(res.data);
   }
 
@@ -143,12 +148,12 @@ export class GoogleCalendarGateway implements CalendarGateway {
       eventId,
       sendUpdates: params.sendInvites ? 'all' : 'none',
       requestBody: body,
-    });
+    }, { timeout: GOOGLE_TIMEOUT_MS });
     return this.toEvent(res.data);
   }
 
   async deleteEvent(eventId: string): Promise<void> {
-    await this.calendar.events.delete({ calendarId: 'primary', eventId });
+    await this.calendar.events.delete({ calendarId: 'primary', eventId }, { timeout: GOOGLE_TIMEOUT_MS });
   }
 
   /** Overlap test on the LIVE calendar: [start, end) intersects [s, e). */

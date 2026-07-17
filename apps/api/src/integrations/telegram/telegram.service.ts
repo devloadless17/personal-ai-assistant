@@ -59,7 +59,12 @@ export class TelegramService {
         });
         const json = (await res.json()) as { ok: boolean; result?: T; description?: string };
         if (json.ok && json.result !== undefined) return json.result;
-        // 4xx from Telegram (bad token, blocked bot…) — retrying won't help.
+        // 429 = rate limited: TRANSIENT, must be retried (with backoff) — never
+        // treat it as permanent, or an interactive reply is lost on a brief burst.
+        if (res.status === 429) {
+          throw new Error(`Telegram ${method} rate-limited (429): ${json.description ?? ''}`);
+        }
+        // Other 4xx from Telegram (bad token, blocked bot…) — retrying won't help.
         if (res.status >= 400 && res.status < 500) {
           throw new PermanentTelegramError(
             `Telegram ${method} rejected: ${json.description ?? res.status}`,

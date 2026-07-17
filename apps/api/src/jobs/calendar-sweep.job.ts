@@ -63,8 +63,10 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
 
   /** Run once on boot so double-bookings are surfaced right after a deploy and
    * the job is immediately observable — de-dup makes the re-scan safe. */
-  async onApplicationBootstrap(): Promise<void> {
-    await this.tick();
+  onApplicationBootstrap(): void {
+    // Detached: don't let a boot sweep (which reads Google) delay/block
+    // app.listen() + the health check. The cron runs it regardless.
+    void this.tick();
   }
 
   @Cron('*/10 * * * *')
@@ -151,24 +153,34 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
 
       for (const { a, b } of pairs) {
         const conflictKey = this.conflictKey(a, b);
-        // Atomic de-dup: unique(clientId, conflictKey). If we've already alerted
-        // this exact conflict, the insert hits P2002 and we skip — one alert per
-        // distinct overlap, never a per-tick repeat.
-        try {
-          await this.prisma.calendarConflictAlert.create({
-            data: { clientId: client.id, conflictKey },
-          });
-        } catch (err) {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') continue;
-          throw err;
-        }
+        // Skip conflicts we've ALREADY alerted (one alert per distinct overlap).
+        const already = await this.prisma.calendarConflictAlert.findFirst({
+          where: { clientId: client.id, conflictKey },
+          select: { id: true },
+        });
+        if (already) continue;
+
         const tz = client.timezone;
         const msg =
           `⚠️ Heads up — two things overlap on your calendar:\n` +
           `• ${a.title} (${formatInTz(a.start, tz)})\n` +
           `• ${b.title} (${formatInTz(b.start, tz)})\n` +
           `Want me to move one?`;
+        // Send FIRST, record the de-dup row only AFTER a confirmed send. If
+        // Telegram is down/rate-limited, the send throws → no row is written →
+        // the conflict re-alerts next tick, instead of being silently buried
+        // forever (the bug of recording the dedup before the send). A rare
+        // duplicate on the tiny send-ok/write-fail window beats a lost alert —
+        // the same durability rule the reminder lease uses.
         await this.telegram.sendMessage(botToken, client.telegramChatId, msg);
+        try {
+          await this.prisma.calendarConflictAlert.create({
+            data: { clientId: client.id, conflictKey },
+          });
+        } catch (err) {
+          // A concurrent tick already recorded it — harmless.
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+        }
         this.lastAlertCount += 1;
         this.logger.log(`Conflict alert sent to client ${client.id}`);
       }

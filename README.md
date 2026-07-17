@@ -107,6 +107,37 @@ docker compose --env-file ../.env up -d --build
 - Update: `git pull && docker compose --env-file ../.env up -d --build`.
 - Logs: `docker compose logs -f api`.
 
+### Backups & restore (do this — it's the only copy)
+
+All client data lives in the `pgdata` Docker volume on the single VPS. **Set up
+automated, off-box backups before onboarding paying clients** — a bad migration,
+disk failure, or an accidental `docker volume rm` otherwise destroys everything
+with no recovery.
+
+`docker/backup.sh` takes a consistent gzipped `pg_dump`, keeps the newest
+`BACKUP_KEEP` (default 56 ≈ 14 days at 6-hourly), and, if `BACKUP_UPLOAD_CMD` is
+set, ships each dump off-box. Schedule it via host cron in the deploy dir:
+
+```bash
+# every 6 hours, with off-box upload (example: rclone → Backblaze B2 / S3)
+export BACKUP_UPLOAD_CMD='rclone copy "$1" b2:my-bucket/assistant/'
+crontab -e
+#   0 */6 * * * cd /opt/assistant/docker && ./backup.sh >> backups/backup.log 2>&1
+```
+
+**Restore** (into the running stack):
+
+```bash
+cd /opt/assistant/docker
+gunzip -c backups/assistant-<TIMESTAMP>.sql.gz \
+  | docker compose -f docker-compose.prod.yml exec -T postgres psql -U assistant -d assistant
+docker compose -f docker-compose.prod.yml restart api   # re-run migrate + reconnect
+```
+
+The dumps use `--clean --if-exists`, so a restore drops and recreates objects —
+safe to run against the existing database. Test a restore into a scratch DB
+periodically; an untested backup is not a backup.
+
 ## 3 · Google Cloud setup (once)
 
 In [console.cloud.google.com](https://console.cloud.google.com) with your existing project:

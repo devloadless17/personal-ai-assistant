@@ -12,7 +12,7 @@
 #
 # Note: a rollback does NOT reverse a database migration. Forward-only
 # migrations are safe; if a release included a destructive migration, restore
-# the database from backup instead.
+# the database from a backup (see ./backup.sh and README → "Backups & restore").
 set -euo pipefail
 
 COMPOSE_FILE="docker-compose.prod.yml"

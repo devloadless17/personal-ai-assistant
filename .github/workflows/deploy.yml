@@ -122,7 +122,7 @@ jobs:
         env:
           REQUIRED: |
             DOCKER_USERNAME DOCKER_SECRET VPS_HOST VPS_USER VPS_SSH_KEY_B64 DOMAIN
-            ENCRYPTION_KEY JWT_SECRET ANTHROPIC_API_KEY
+            ENCRYPTION_KEY JWT_SECRET ANTHROPIC_API_KEY ADMIN_EMAIL ADMIN_PASSWORD
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           missing=""
@@ -183,10 +183,11 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          # Default dashboard login if the secrets aren't set (override anytime
-          # by adding ADMIN_EMAIL / ADMIN_PASSWORD secrets + redeploying).
-          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || 'ali@loadless.ai' }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'loadless' }}
+          # Dashboard login — BOTH are required secrets (validated above), so a
+          # deploy can never stand up the admin plane with a known default
+          # password. No literal fallback here on purpose.
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
           ADMIN_ALERT_BOT_TOKEN: ${{ secrets.ADMIN_ALERT_BOT_TOKEN }}
           ADMIN_ALERT_CHAT_ID: ${{ secrets.ADMIN_ALERT_CHAT_ID }}
         run: |

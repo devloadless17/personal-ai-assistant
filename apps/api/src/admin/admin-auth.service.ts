@@ -5,6 +5,11 @@ import { compare, hash } from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import type { Env } from '../config/env.validation';
 
+/** A valid bcrypt(cost 12) hash of a random string. Compared against on the
+ * unknown-email login path so a real bcrypt op runs either way (constant-shape
+ * timing → no admin-email enumeration). It matches no real password. */
+const DUMMY_BCRYPT_HASH = '$2b$12$NZBbMyD73mmcBmQ3.dP.0eDgb0cVsU2ttsvu6k.Oc9BFGKmfhdwWy';
+
 export interface AdminJwtPayload {
   sub: string;
   // Distinguishes admin tokens from client-portal tokens. Both are signed
@@ -51,8 +56,10 @@ export class AdminAuthService implements OnModuleInit {
 
   async login(email: string, password: string): Promise<{ token: string }> {
     const admin = await this.prisma.adminUser.findUnique({ where: { email } });
-    // Constant-shape flow: hash-compare even for unknown emails (timing).
-    const ok = admin ? await compare(password, admin.passwordHash) : false;
+    // Constant-SHAPE flow: run a real bcrypt compare even for an unknown email
+    // (against a fixed dummy hash) so response time doesn't reveal whether an
+    // admin email exists (user enumeration). Both branches do one bcrypt op.
+    const ok = await compare(password, admin?.passwordHash ?? DUMMY_BCRYPT_HASH);
     if (!admin || !ok) throw new UnauthorizedException('Invalid email or password');
 
     const payload: AdminJwtPayload = { sub: admin.id, type: 'admin', email: admin.email };

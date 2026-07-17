@@ -17,7 +17,10 @@ export class AnthropicService {
     const apiKey = config.get('ANTHROPIC_API_KEY', { infer: true });
     this.model = config.get('ANTHROPIC_MODEL', { infer: true });
     if (apiKey) {
-      this.client = new Anthropic({ apiKey });
+      // Bound each request so a hung API call can't occupy a client's serialized
+      // turn (up to MAX_TOOL_ITERATIONS × the SDK's ~10-min default otherwise),
+      // which would stall that client's message queue and grow it unbounded.
+      this.client = new Anthropic({ apiKey, timeout: 120_000, maxRetries: 2 });
     } else {
       this.client = null;
       this.logger.warn('ANTHROPIC_API_KEY not set — the assistant cannot answer until it is.');

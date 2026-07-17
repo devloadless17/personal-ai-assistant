@@ -39,8 +39,12 @@ export class ReminderJob implements OnApplicationBootstrap {
 
   /** Catch up on any overdue reminders immediately on boot (e.g. after a
    * restart/redeploy), instead of waiting up to a minute for the first tick. */
-  async onApplicationBootstrap(): Promise<void> {
-    await this.tick();
+  onApplicationBootstrap(): void {
+    // Detached on purpose: Nest awaits bootstrap hooks before app.listen(), so
+    // awaiting a tick that makes external calls could delay (or, if it hangs,
+    // block) the HTTP server + health check from coming up. The cron runs it
+    // regardless; tick() logs/alerts on its own failures.
+    void this.tick();
   }
 
   /** Lease window: a claimed-but-unconfirmed reminder is re-claimable after
