@@ -143,10 +143,14 @@ export class ReminderJob implements OnApplicationBootstrap {
         throw new Error('client has no bot token or bound chat');
       }
       const when = task.dueAt ? ` (due ${formatInTz(task.dueAt, client.timezone)})` : '';
+      // Safety net: the ping already prefixes "⏰ Reminder:", so strip a leading
+      // "Reminder"/"Reminder:" the model may have baked into the title — otherwise
+      // it reads as a doubled "⏰ Reminder: Reminder: Meeting".
+      const subject = task.title.replace(/^\s*reminders?\b\s*[:\-–]?\s*/i, '').trim() || task.title;
       await this.telegram.sendMessage(
         botToken,
         client.telegramChatId,
-        `⏰ Reminder: ${task.title}${when}`,
+        `⏰ Reminder: ${subject}${when}`,
       );
       // Delivery CONFIRMED — recurring reminders roll forward to their next
       // occurrence; one-shots are marked permanently sent.
