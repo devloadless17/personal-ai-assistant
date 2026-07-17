@@ -515,6 +515,16 @@ export const updateCalendarEvent = defineTool({
         reminderNote =
           " (The event was updated, but I couldn't adjust its Telegram reminder — ask me to set it again.)";
       }
+    } else if (touchCompanions && rest.title !== undefined) {
+      // Title-only change (no time/reminder edit, so the companions weren't
+      // rebuilt above): sync their titles so the ping shows the CURRENT name,
+      // not the stale one it was first armed with. Best-effort — the calendar
+      // event itself is already updated.
+      try {
+        await ctx.repo.renameEventReminders(seriesId, event.title);
+      } catch {
+        /* leave the reminder on its old title rather than fail the whole update */
+      }
     }
     const scopeNote = applyToSeries
       ? ' — applied to the whole recurring series'

@@ -143,6 +143,19 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
       const auth = await this.google.authorizedClientFor(client);
       if (!auth) return;
       const gateway = new GoogleCalendarGateway(auth, client.timezone);
+
+      // Keep companion reminders in sync with the LIVE calendar even when the
+      // client edited the meeting directly in the Google app (bypassing the
+      // bot). Isolated try/catch so a reconcile hiccup never suppresses the
+      // conflict alerts below.
+      try {
+        await this.reconcileCompanions(client, gateway, now);
+      } catch (err) {
+        this.logger.error(
+          `Reminder reconcile failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       const pairs = await gateway.findOverlappingPairs(now, new Date(now.getTime() + HORIZON_MS));
       if (pairs.length === 0) return;
 
@@ -194,6 +207,90 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
         `sweep-${client.id}`,
         `Calendar sweep failing for client "${client.name}" — check their Google connection.`,
       );
+    }
+  }
+
+  /** Max companions reconciled per client per sweep — bounds the live Google
+   * getEvent calls; anything beyond is picked up on the next shard tick. */
+  private static readonly RECONCILE_CAP = 50;
+
+  /**
+   * Reconcile a client's companion reminders against their LIVE Google calendar,
+   * so a reminder stays correct even when the meeting was edited directly in the
+   * Google app (which never routes through the bot):
+   *   • renamed meeting     → sync the ping's title
+   *   • moved (one-off)      → re-time the ping to (new start − lead)
+   *   • deleted/cancelled    → remove the orphaned ping
+   *
+   * Scope is deliberately safe:
+   * - Only NEAR-TERM companions (next fire within the sweep horizon) are checked;
+   *   further-out ones reconcile as they approach (this client is swept hourly).
+   * - RECURRING series get title + orphan handling ONLY — the reminder cron's
+   *   recurrence math owns each occurrence's fire time, so we never rewrite those.
+   * - Orphan deletion is safe because getEvent() returns null ONLY for a
+   *   cancelled/404/410 event; a transient Google error THROWS (caught, skipped),
+   *   so a network blip can never delete a live reminder.
+   */
+  private async reconcileCompanions(
+    client: Client,
+    gateway: GoogleCalendarGateway,
+    now: Date,
+  ): Promise<void> {
+    const horizonEnd = new Date(now.getTime() + HORIZON_MS);
+    const companions = await this.prisma.task.findMany({
+      where: {
+        clientId: client.id,
+        sourceEventId: { not: null },
+        reminderSent: false,
+        status: 'open',
+        reminderAt: { not: null, lte: horizonEnd },
+      },
+      orderBy: { reminderAt: 'asc' },
+      take: CalendarSweepJob.RECONCILE_CAP,
+    });
+    if (companions.length === 0) return;
+
+    // Cache getEvent per source id — a meeting's several companions (e.g. 1h +
+    // 10m before) share one event, so we fetch it once.
+    const cache = new Map<string, CalendarEvent | null>();
+    for (const c of companions) {
+      const eventId = c.sourceEventId as string;
+      if (!cache.has(eventId)) cache.set(eventId, await gateway.getEvent(eventId));
+      const ev = cache.get(eventId) ?? null;
+
+      if (ev === null) {
+        // Source event genuinely gone (cancelled/404/410) → clear its orphan
+        // reminder(s). Scoped to unsent rows for this event only.
+        const { count } = await this.prisma.task.deleteMany({
+          where: { clientId: client.id, sourceEventId: eventId, reminderSent: false },
+        });
+        if (count > 0)
+          this.logger.log(
+            `Cleared ${count} orphaned reminder(s) for deleted event ${eventId} (client ${client.id})`,
+          );
+        continue;
+      }
+
+      const patch: Prisma.TaskUpdateManyMutationInput = {};
+      // Title drift — applies to one-off AND recurring (a title is series-wide).
+      if (ev.title && ev.title !== c.title) patch.title = ev.title;
+      // Time drift — one-off only. (getEvent on a recurring master returns the
+      // series' FIRST start, not this companion's occurrence, so re-timing a
+      // recurring companion from it would be wrong; the cron owns those.)
+      if (!c.recurrenceFreq && c.reminderLeadMinutes != null && c.reminderAt) {
+        const expected = new Date(ev.start.getTime() - c.reminderLeadMinutes * 60_000);
+        if (Math.abs(expected.getTime() - c.reminderAt.getTime()) > 60_000) {
+          patch.reminderAt = expected;
+          patch.reminderClaimedAt = null; // release any stale lease so it re-fires cleanly
+        }
+      }
+      if (Object.keys(patch).length > 0) {
+        await this.prisma.task.updateMany({
+          where: { id: c.id, clientId: client.id },
+          data: patch,
+        });
+        this.logger.log(`Reconciled reminder ${c.id} to live event ${eventId} (client ${client.id})`);
+      }
     }
   }
 

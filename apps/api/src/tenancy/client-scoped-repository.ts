@@ -103,6 +103,19 @@ export class ClientScopedRepository {
     });
   }
 
+  /**
+   * Rename an event's companion reminder(s) so the Telegram ping shows the
+   * meeting's CURRENT title. Needed when a meeting is renamed without changing
+   * its time or reminders (which would otherwise leave the companions — and thus
+   * the ping — on the stale old title).
+   */
+  async renameEventReminders(eventId: string, title: string): Promise<void> {
+    await this.prisma.task.updateMany({
+      where: { clientId: this.clientId, sourceEventId: eventId },
+      data: { title },
+    });
+  }
+
   /** The lead time of an event's companion reminder, so a move can preserve it. */
   async getEventReminderLead(eventId: string): Promise<number | null> {
     const task = await this.prisma.task.findFirst({

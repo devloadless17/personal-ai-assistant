@@ -77,6 +77,7 @@ function ctxWith(gateway?: CalendarGateway): ToolContext {
   const repo = {
     createTask: jest.fn().mockResolvedValue({}),
     deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+    renameEventReminders: jest.fn().mockResolvedValue(undefined),
     getEventReminderLead: jest.fn().mockResolvedValue(null),
     getEventReminder: jest.fn().mockResolvedValue(null),
     getEventReminders: jest.fn().mockResolvedValue([]),
@@ -629,6 +630,47 @@ describe('calendar tools — conflict gating & honesty', () => {
     );
     expect(del).toEqual([]); // series companions untouched
     expect(created).toEqual([]); // not re-anchored to the moved instance
+  });
+
+  it('syncs the companion reminder title when a meeting is renamed (no time/reminder change)', async () => {
+    // Regression: renaming a meeting must update its reminder so the ping shows
+    // the CURRENT name, not the stale title the companion was first armed with.
+    const evt: CalendarEvent = {
+      id: 'ev-rename',
+      title: 'Meeting with Ali, Ismael and Hasanberg',
+      start: new Date('2026-07-17T18:00:00Z'),
+      end: new Date('2026-07-17T19:00:00Z'),
+      allDay: false,
+    };
+    const gw = makeGateway([evt]);
+    const renamed: { id: string; title: string }[] = [];
+    const del: string[] = [];
+    const ctx = {
+      repo: {
+        createTask: jest.fn().mockResolvedValue({}),
+        renameEventReminders: jest.fn((id: string, title: string) => {
+          renamed.push({ id, title });
+          return Promise.resolve();
+        }),
+        deleteEventReminders: jest.fn((id: string) => {
+          del.push(id);
+          return Promise.resolve();
+        }),
+        getEventReminders: jest.fn().mockResolvedValue([
+          { reminderLeadMinutes: 15, recurrenceFreq: null, recurrenceInterval: null, recurrenceWeekdays: [], recurrenceUntil: null, recurrenceTimezone: null },
+        ]),
+      } as unknown as ClientScopedRepository,
+      client: CLIENT,
+      now: new Date('2026-07-17T09:00:00Z'),
+      calendar: gw,
+    } as ToolContext;
+    await updateCalendarEvent.execute(
+      { event_id: 'ev-rename', title: 'Meeting with Ali Shmayssani and Hussein Bdeir' },
+      ctx,
+    );
+    // Title synced onto the companion; companions NOT torn down (no re-arm).
+    expect(renamed).toEqual([{ id: 'ev-rename', title: 'Meeting with Ali Shmayssani and Hussein Bdeir' }]);
+    expect(del).toEqual([]);
   });
 
   it('every calendar tool answers honestly when Google is not connected', async () => {
