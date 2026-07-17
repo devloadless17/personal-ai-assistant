@@ -144,9 +144,11 @@ export class ReminderJob implements OnApplicationBootstrap {
       }
       const when = task.dueAt ? ` (due ${formatInTz(task.dueAt, client.timezone)})` : '';
       // Safety net: the ping already prefixes "⏰ Reminder:", so strip a leading
-      // "Reminder"/"Reminder:" the model may have baked into the title — otherwise
-      // it reads as a doubled "⏰ Reminder: Reminder: Meeting".
-      const subject = task.title.replace(/^\s*reminders?\b\s*[:\-–]?\s*/i, '').trim() || task.title;
+      // "Reminder:"/"Reminder -" the model may have baked into the title (else it
+      // reads as a doubled "⏰ Reminder: Reminder: Meeting"). Require an actual
+      // separator so a real subject that just starts with the word — e.g.
+      // "Reminder about taxes" — is left completely intact.
+      const subject = task.title.replace(/^\s*reminders?\s*[:\-–]\s*/i, '').trim() || task.title;
       await this.telegram.sendMessage(
         botToken,
         client.telegramChatId,
