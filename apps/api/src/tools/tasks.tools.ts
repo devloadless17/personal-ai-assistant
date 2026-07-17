@@ -158,7 +158,16 @@ export const createTask = defineTool({
       ),
     reminder_at: isoDateTime
       .optional()
-      .describe('Exact reminder datetime (ISO 8601). Use only when the client names a specific time.'),
+      .describe('Exact reminder datetime (ISO 8601). Use only when the client names a specific CLOCK time ("at 9:30", "tomorrow 3pm").'),
+    reminder_in_minutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(44640) // 31 days
+      .optional()
+      .describe(
+        'For a RELATIVE reminder counted from NOW ("in 10 minutes" → 10, "after 2 hours" → 120, "in 3 days" → 4320). The system computes the exact time from the current moment — ALWAYS use this for relative times instead of calculating a clock time yourself (you WILL get the arithmetic wrong). Takes precedence over reminder_at.',
+      ),
     repeat: repeatSchema
       .optional()
       .describe(
@@ -167,9 +176,23 @@ export const createTask = defineTool({
     notes: z.string().max(2000).optional().describe('Extra details, if any.'),
   }),
   async execute(input, ctx) {
-    const rem = resolveReminderAt(input.reminder_at, input.reminder_minutes_before, input.due_at);
+    // A RELATIVE reminder ("in 10 minutes") is computed HERE from the current
+    // time — never by the model, which botches clock arithmetic (e.g. "10 min
+    // from 2:43pm" once became 9:07pm). It behaves like an explicit reminder_at
+    // and takes precedence over it.
+    const relativeReminderAt =
+      input.reminder_in_minutes !== undefined
+        ? new Date(ctx.now.getTime() + input.reminder_in_minutes * 60_000)
+        : undefined;
+    const rem = resolveReminderAt(
+      relativeReminderAt ?? input.reminder_at,
+      input.reminder_minutes_before,
+      input.due_at,
+    );
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was created.`;
-    const type = input.type ?? 'task';
+    // A relative offset is definitionally a reminder — default the type so the
+    // ping always fires even if the model forgot to set type=reminder.
+    const type = input.type ?? (input.reminder_in_minutes !== undefined ? 'reminder' : 'task');
     let reminderAt = rem.changed ? rem.value : null;
     let dueAt = input.due_at ?? null;
     // App-owned guarantee: a REMINDER must actually fire. The model sometimes
@@ -195,7 +218,7 @@ export const createTask = defineTool({
     }
     const task = await ctx.repo.createTask({
       title: input.title,
-      type: input.type,
+      type,
       dueAt,
       reminderAt,
       notes: input.notes ?? null,

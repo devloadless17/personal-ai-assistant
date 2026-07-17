@@ -72,6 +72,31 @@ describe('tasks tools — reminder firing guarantee', () => {
     expect(created[0]?.dueAt).toEqual(new Date('2026-07-16T09:30:00Z'));
   });
 
+  it('a RELATIVE reminder ("in 10 minutes") is computed from now server-side, not by the model', async () => {
+    const { ctx, created } = ctxCapturing(); // ctx.now = 2026-07-16T09:00:00Z
+    await createTask.execute({ title: 'Check the oven', reminder_in_minutes: 10 }, ctx);
+    expect(created).toHaveLength(1);
+    // now + 10 min — deterministic, immune to the model's clock-math errors.
+    expect(created[0]?.reminderAt).toEqual(new Date('2026-07-16T09:10:00Z'));
+    // Defaults to a reminder even though type was omitted, so the ping fires.
+    expect(created[0]?.type).toBe('reminder');
+    expect(created[0]?.dueAt).toEqual(new Date('2026-07-16T09:10:00Z'));
+  });
+
+  it('reminder_in_minutes takes precedence over a model-supplied reminder_at', async () => {
+    const { ctx, created } = ctxCapturing();
+    await createTask.execute(
+      {
+        title: 'Ping',
+        type: 'reminder',
+        reminder_in_minutes: 30,
+        reminder_at: new Date('2030-01-01T00:00:00Z'), // wrong clock time from the model
+      },
+      ctx,
+    );
+    expect(created[0]?.reminderAt).toEqual(new Date('2026-07-16T09:30:00Z'));
+  });
+
   it('an explicit reminder_minutes_before still wins over the default', async () => {
     const { ctx, created } = ctxCapturing();
     await createTask.execute(
