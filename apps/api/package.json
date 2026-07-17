@@ -9,7 +9,7 @@
     "start": "node dist/main.js",
     "lint": "eslint \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "jest --passWithNoTests",
+    "test": "NODE_OPTIONS=--max-old-space-size=3072 jest --passWithNoTests --maxWorkers=2",
     "db:generate": "dotenv -e ../../.env -- prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate deploy",
     "db:migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",

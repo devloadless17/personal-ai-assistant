@@ -9,9 +9,9 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "pnpm --parallel --filter @assistant/api --filter @assistant/web dev",
-    "build": "pnpm -r build",
+    "build": "pnpm -r --workspace-concurrency=1 build",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r --workspace-concurrency=1 typecheck",
     "test": "pnpm -r --filter '!@assistant/e2e' test",
     "e2e": "pnpm --filter @assistant/e2e test",
     "db:migrate": "pnpm --filter @assistant/api db:migrate",
