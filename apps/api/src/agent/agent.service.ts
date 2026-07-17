@@ -13,7 +13,7 @@ import { buildVolatilePrompt, STABLE_TEMPLATE } from './system-prompt';
 /** Hard ceiling on tool-use round trips per client message. */
 const MAX_TOOL_ITERATIONS = 8;
 /** Conversation context: last N messages. */
-const HISTORY_LIMIT = 30;
+const HISTORY_LIMIT = 12;
 
 /**
  * Tools that CHANGE data. A reply claiming a completed action is only
