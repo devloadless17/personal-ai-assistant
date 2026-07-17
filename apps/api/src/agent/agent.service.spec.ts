@@ -412,6 +412,25 @@ describe('AgentService — reliability invariants', () => {
     expect(stateB.audits.every((a) => (a as unknown as { clientId: string }).clientId === 'client-B')).toBe(true);
   });
 
+  it('does NOT correct a clarifying question that states a FUTURE intention ("I\'ll set it up")', async () => {
+    // Client: "I have a meeting every Sunday" (no time). Assistant asks the time
+    // and says "I'll set it up" — a future intention, NOT a completion claim.
+    const { repo, state } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [
+        textResponse(
+          "What time (and how long) is your Sunday sales team meeting? Let me know and I'll set it up.",
+        ),
+      ],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(1); // NO spurious correction round
+    expect(reply).toContain('What time');
+    expect(reply).not.toContain('claim'); // no internal meta leaked
+    expect(state.tasks).toHaveLength(0);
+  });
+
   it('does NOT correct an honest read-only availability answer ("you\'re all set — nothing booked")', async () => {
     const { repo, state } = makeFakeRepo();
     const { agent, createMessage } = makeAgent(

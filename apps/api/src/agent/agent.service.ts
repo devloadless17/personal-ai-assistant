@@ -47,8 +47,11 @@ const COMPLETION_CLAIM = new RegExp(
     "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|completed|done|set|marked|saved)\\b",
     // "All done", "All set", "You're all set/booked" as a standalone confirmation.
     "\\b(all (done|set)|you'?re all (set|booked))\\b",
-    // First-person claim anywhere: "I added", "I've booked", "I'll set", "I have put".
-    "\\bi(?:'ve| have| will|'ll)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|put|arranged|confirmed|logged|remind)",
+    // First-person claim of a DONE action: "I added", "I've booked", "I have
+    // put", "I just set". NOTE: only past / present-perfect — NOT future
+    // ("I'll set it up", "I will add that" are intentions after asking a
+    // question, not completions). "I'll remind/ping you" is handled separately.
+    "\\bi(?:'ve| have)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|completed|set|marked|saved|noted|put|arranged|confirmed|logged)\\b",
     // "Got it — reminder for 9:30" style.
     "\\bgot it\\b[\\s\\S]{0,40}\\bremind",
     // Impersonal confirmations ("now" optional): "is scheduled", "is/it's on your calendar", "is confirmed".
@@ -265,7 +268,7 @@ export class AgentService {
         messages.push({
           role: 'user',
           content:
-            'SYSTEM CHECK: your last message told me something was done, but the tool to do it did not run successfully this turn, so it did NOT actually happen. Call the correct tool NOW to really do it. If it genuinely cannot be done, reply again stating plainly what did and did not go through — never claim a completed action that did not occur.',
+            "SYSTEM CHECK (internal — the client must NEVER see this note or any mention of it): your last reply implied an action was already completed, but no tool actually performed it this turn. Decide what's true and reply to the CLIENT naturally: if the action can be done now, call the correct tool and then confirm; if you were only ASKING for information (e.g. a missing time), just ask that question naturally; if it truly couldn't be done, say so plainly. Never write meta-commentary like \"I didn't claim anything\" — just respond as the assistant.",
         });
         continue;
       }
