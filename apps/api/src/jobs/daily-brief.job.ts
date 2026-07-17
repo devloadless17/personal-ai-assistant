@@ -183,21 +183,17 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       lines.push('', '📅 Calendar: couldn’t be read right now — check it directly today.');
     }
 
-    // Tasks — overdue and today fetched SEPARATELY (each capped), so a big
-    // backlog of overdue items can never crowd today's tasks out of the window
-    // (a single dueTo query orders oldest-first and would fill all 25 slots
-    // with stale overdue, hiding today's — the exact bug this avoids).
-    const [overdueRes, todayRes] = await Promise.all([
-      repo.findTasks({ status: 'open', dueTo: dayStart, includeUndated: false, limit: 25 }),
-      repo.findTasks({ status: 'open', dueFrom: dayStart, dueTo: dayEnd, includeUndated: false, limit: 25 }),
-    ]);
-    const overdue = overdueRes.tasks.filter((t) => t.dueAt && t.dueAt < dayStart);
+    // TODAY's tasks only — the brief is a look at the day ahead, not a backlog.
+    // Overdue items from previous days are deliberately NOT dragged in here.
+    const todayRes = await repo.findTasks({
+      status: 'open',
+      dueFrom: dayStart,
+      dueTo: dayEnd,
+      includeUndated: false,
+      limit: 25,
+    });
     const today = todayRes.tasks.filter((t) => t.dueAt && t.dueAt >= dayStart);
-    if (overdue.length > 0) {
-      lines.push('', '⚠️ Overdue:');
-      for (const t of overdue) lines.push(`  • ${t.title} (was due ${formatInTz(t.dueAt as Date, tz)})`);
-    }
-    lines.push('', '✅ Tasks due today:');
+    lines.push('', '✅ Tasks today:');
     if (today.length === 0) {
       lines.push('  None due today.');
     } else {

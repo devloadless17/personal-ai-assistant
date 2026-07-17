@@ -88,7 +88,9 @@ export const setReminderPreference = defineTool({
       .min(0)
       .max(23)
       .optional()
-      .describe("Hour (0–23, the client's local time) to send the daily summary."),
+      .describe(
+        "Hour (0–23, 24-hour, the client's local time) to send the daily summary. CONVERT AM/PM correctly: 8am=8, noon=12, 11pm=23, midnight=0. If the client gives a bare hour with no am/pm (e.g. 'at 11'), briefly confirm morning vs evening before setting it.",
+      ),
   }),
   async execute(input, ctx) {
     const parts: string[] = [];
