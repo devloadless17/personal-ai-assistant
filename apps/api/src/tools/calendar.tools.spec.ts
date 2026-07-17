@@ -8,7 +8,13 @@ import {
 import type { CalendarEvent, CalendarGateway, ToolContext } from './tool.types';
 import type { ClientScopedRepository } from '../tenancy/client-scoped-repository';
 
-const CLIENT = { id: 'c1', timezone: 'UTC', name: 'T', assistantName: 'A' } as Client;
+const CLIENT = {
+  id: 'c1',
+  timezone: 'UTC',
+  name: 'T',
+  assistantName: 'A',
+  defaultMeetingMinutes: 90,
+} as Client;
 
 function makeGateway(
   existing: CalendarEvent[],
@@ -121,6 +127,74 @@ describe('calendar tools — conflict gating & honesty', () => {
     expect(result).toContain('CONFLICT');
     expect(result).toContain('Nearest open times');
     expect(gw.created).toHaveLength(0);
+  });
+
+  it('does NOT drop a recurring meeting reminder when its first ping is already past', async () => {
+    // Regression: a daily meeting whose first reminder (start-lead) is in the
+    // past must still arm the companion at the next FUTURE occurrence.
+    const created: Record<string, unknown>[] = [];
+    const gw = makeGateway([]);
+    const ctx = {
+      repo: {
+        createTask: jest.fn((d: Record<string, unknown>) => {
+          created.push(d);
+          return Promise.resolve({});
+        }),
+        deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+        getEventReminder: jest.fn().mockResolvedValue(null),
+      } as unknown as ClientScopedRepository,
+      client: CLIENT, // UTC
+      now: new Date('2026-07-16T09:00:00Z'),
+      calendar: gw,
+    } as ToolContext;
+    const res = await createCalendarEvent.execute(
+      {
+        title: 'Standup',
+        start: new Date('2026-07-16T09:05:00Z'), // first reminder 08:50 = past
+        end: new Date('2026-07-16T09:20:00Z'),
+        repeat: { freq: 'daily' },
+        reminder_minutes_before: 15,
+      },
+      ctx,
+    );
+    expect(created).toHaveLength(1); // companion NOT dropped
+    // Armed at the next future occurrence (tomorrow 08:50Z), pinned to the zone.
+    expect(created[0]?.reminderAt).toEqual(new Date('2026-07-17T08:50:00Z'));
+    expect(created[0]?.recurrenceFreq).toBe('DAILY');
+    expect(created[0]?.recurrenceTimezone).toBe('UTC');
+    expect(res).toContain('each time');
+  });
+
+  it('applies the client default meeting length when no end is given', async () => {
+    const gw = makeGateway([]);
+    await createCalendarEvent.execute(
+      { title: 'Quick sync', start: new Date('2026-07-18T09:00:00Z') }, // no end
+      ctxWith(gw),
+    );
+    expect(gw.created).toHaveLength(1);
+    // start + defaultMeetingMinutes (90) — computed server-side, not by the model.
+    expect(gw.created[0]?.end).toEqual(new Date('2026-07-18T10:30:00Z'));
+  });
+
+  it('a per-event duration_minutes overrides the client default', async () => {
+    const gw = makeGateway([]);
+    await createCalendarEvent.execute(
+      { title: 'Standup', start: new Date('2026-07-18T09:00:00Z'), duration_minutes: 30 },
+      ctxWith(gw),
+    );
+    expect(gw.created[0]?.end).toEqual(new Date('2026-07-18T09:30:00Z'));
+  });
+
+  it('stamps the event with the client live timezone', async () => {
+    const gw = makeGateway([]);
+    await createCalendarEvent.execute(
+      { title: 'Zoned', start: new Date('2026-07-18T09:00:00Z'), end: new Date('2026-07-18T10:00:00Z') },
+      ctxWith(gw),
+    );
+    // makeGateway spreads the create params into `created`, so the stamped
+    // timeZone is captured there.
+    const first = gw.created[0] as unknown as { timeZone?: string } | undefined;
+    expect(first?.timeZone).toBe('UTC');
   });
 
   it('books cleanly when the slot is free', async () => {

@@ -173,6 +173,9 @@ export class ReminderJob implements OnApplicationBootstrap {
    * row can never get stuck re-sending.
    */
   private async advanceOrComplete(task: Task, timezone: string, now: Date): Promise<void> {
+    // A recurrence pinned to a fixed zone ("8am Beirut daily") uses that zone;
+    // otherwise it follows the client's CURRENT zone (a routine that travels).
+    const zone = task.recurrenceTimezone ?? timezone;
     let computeFailed = false;
     try {
       if (task.recurrenceFreq && task.reminderAt) {
@@ -184,7 +187,7 @@ export class ReminderJob implements OnApplicationBootstrap {
           task.recurrenceFreq,
           task.recurrenceInterval ?? 1,
           task.recurrenceWeekdays,
-          timezone,
+          zone,
           task.recurrenceAnchor,
         );
         for (let i = 0; i < 1000 && next.getTime() <= now.getTime(); i++) {
@@ -193,7 +196,7 @@ export class ReminderJob implements OnApplicationBootstrap {
             task.recurrenceFreq,
             task.recurrenceInterval ?? 1,
             task.recurrenceWeekdays,
-            timezone,
+            zone,
             task.recurrenceAnchor,
           );
           if (after.getTime() <= next.getTime()) break; // safety: no progress

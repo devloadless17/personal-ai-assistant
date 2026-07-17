@@ -128,6 +128,47 @@ describe('tasks tools — reminder firing guarantee', () => {
     expect(created[0]?.reminderAt).toEqual(new Date('2026-07-17T14:00:00Z'));
   });
 
+  it('a recurring reminder pins its zone when recurrence_timezone is given', async () => {
+    const { ctx, created } = ctxCapturing();
+    await createTask.execute(
+      {
+        title: 'Beirut standup',
+        type: 'reminder',
+        reminder_at: new Date('2026-07-17T05:00:00Z'),
+        repeat: { freq: 'daily' },
+        recurrence_timezone: 'Asia/Beirut',
+      },
+      ctx,
+    );
+    expect(created[0]?.recurrenceTimezone).toBe('Asia/Beirut');
+  });
+
+  it('a recurring reminder with NO zone is anchored to the client\'s CURRENT zone (stable local time)', async () => {
+    const { ctx, created } = ctxCapturing(); // CLIENT.timezone = 'UTC'
+    await createTask.execute(
+      {
+        title: 'vitamins',
+        type: 'reminder',
+        reminder_at: new Date('2026-07-17T05:00:00Z'),
+        repeat: { freq: 'daily' },
+      },
+      ctx,
+    );
+    // Pinned to the creation zone (not left null/drifting) so it fires at a
+    // consistent local time, like a Google Calendar recurring event.
+    expect(created[0]?.recurrenceTimezone).toBe('UTC');
+  });
+
+  it('an invalid recurrence_timezone is rejected', async () => {
+    const { ctx, created } = ctxCapturing();
+    const res = await createTask.execute(
+      { title: 'x', type: 'reminder', reminder_at: new Date('2026-07-17T05:00:00Z'), repeat: { freq: 'daily' }, recurrence_timezone: 'Nowhere/Nope' },
+      ctx,
+    );
+    expect(res).toContain('ERROR');
+    expect(created).toHaveLength(0);
+  });
+
   it('a recurring reminder with no time is rejected (needs an anchor)', async () => {
     const { ctx, created } = ctxCapturing();
     const res = await createTask.execute(

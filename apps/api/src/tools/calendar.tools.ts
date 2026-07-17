@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { defineTool } from './tool.types';
 import type { CalendarEvent, ToolContext } from './tool.types';
 import { repeatBaseSchema, repeatToFields, repeatToRRule } from './tasks.tools';
-import { formatInTz, isoDateTime, isoInTz, withClientOffset } from './time';
+import { firstFutureOccurrence, formatInTz, isoDateTime, isoInTz, withClientOffset } from './time';
 
 const NOT_CONNECTED =
   'ERROR: Google Calendar is not connected for this client yet. Tell the client their calendar isn\'t linked and that the administrator can send them a connection link. Do NOT claim any calendar action succeeded.';
@@ -121,7 +121,20 @@ export const createCalendarEvent = defineTool({
   schema: z.object({
     title: z.string().min(1).max(300),
     start: isoDateTime.describe('Event start (ISO 8601).'),
-    end: isoDateTime.describe('Event end (ISO 8601). Must be after start.'),
+    end: isoDateTime
+      .optional()
+      .describe(
+        'Event end (ISO 8601). OMIT it when the client only gave a start — the system then applies their default meeting length (or duration_minutes). Provide it only when they gave an explicit end time.',
+      ),
+    duration_minutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(1440)
+      .optional()
+      .describe(
+        'Meeting length in minutes when the client states a duration for THIS event ("just 30 minutes", "a 2-hour workshop"). Overrides the client default. Ignored if end is given.',
+      ),
     description: z.string().max(2000).optional(),
     location: z.string().max(300).optional(),
     attendees: z
@@ -156,11 +169,20 @@ export const createCalendarEvent = defineTool({
   }),
   async execute(input, ctx) {
     if (!ctx.calendar) return NOT_CONNECTED;
-    if (input.end <= input.start) return 'ERROR: end must be after start. Nothing was created.';
+    // End is resolved SERVER-SIDE: explicit end wins; else start + this event's
+    // duration; else the client's configurable default meeting length. The model
+    // never has to do the arithmetic (and the client default is applied here).
+    const end =
+      input.end ??
+      new Date(
+        input.start.getTime() +
+          (input.duration_minutes ?? ctx.client.defaultMeetingMinutes) * 60_000,
+      );
+    if (end <= input.start) return 'ERROR: end must be after start. Nothing was created.';
     // Conflict-check only the FIRST occurrence (recurring series can't be fully
     // pre-checked); still catches the common "this slot is taken" case.
     if (!input.allow_conflict) {
-      const conflicts = await conflictWarning(ctx, input.start, input.end);
+      const conflicts = await conflictWarning(ctx, input.start, end);
       if (conflicts) {
         return `CONFLICT — nothing was created. The requested time overlaps:\n${conflicts}\nAsk the client whether to pick another time or book anyway (then retry with allow_conflict=true).`;
       }
@@ -168,12 +190,14 @@ export const createCalendarEvent = defineTool({
     const event = await ctx.calendar.createEvent({
       title: input.title,
       start: input.start,
-      end: input.end,
+      end,
       description: input.description,
       location: input.location,
       attendees: input.attendees,
       sendInvites: input.send_invites,
       recurrence: input.repeat ? repeatToRRule(input.repeat) : undefined,
+      // Stamp the client's LIVE zone so a same-turn travel switch is reflected.
+      timeZone: ctx.client.timezone,
     });
 
     let reminderNote = '';
@@ -181,16 +205,31 @@ export const createCalendarEvent = defineTool({
       // A companion reminder in our DB drives the Telegram ping via the same
       // reliable reminder cron the tasks use (the calendar itself is not
       // polled). Keyed on the SERIES master id so it moves/cancels with the event.
-      const reminderAt = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
-      if (reminderAt.getTime() > ctx.now.getTime()) {
-        // A recurring meeting gets a RECURRING companion reminder (ping before
-        // EACH occurrence) — unless the pattern is one our DB cron can't
-        // represent (weekly interval>1 with weekdays), where it's one-shot.
-        const rep = input.repeat;
-        const companionRec =
-          rep && !(rep.freq === 'weekly' && (rep.interval ?? 1) > 1 && (rep.weekdays?.length ?? 0) > 0)
-            ? { ...repeatToFields(rep), recurrenceAnchor: reminderAt }
-            : null;
+      const firstAnchor = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
+      // A recurring meeting gets a RECURRING companion (ping before EACH
+      // occurrence) — unless the pattern is one our DB cron can't represent.
+      const rep = input.repeat;
+      const companionRec =
+        rep && !(rep.freq === 'weekly' && (rep.interval ?? 1) > 1 && (rep.weekdays?.length ?? 0) > 0)
+          ? repeatToFields(rep)
+          : null;
+      // For a recurring companion whose FIRST reminder is already past (e.g. the
+      // series' first occurrence is today and the lead has elapsed), arm the next
+      // FUTURE occurrence instead of dropping every future ping.
+      const reminderAt = companionRec
+        ? firstFutureOccurrence(
+            firstAnchor,
+            companionRec.recurrenceFreq,
+            companionRec.recurrenceInterval,
+            companionRec.recurrenceWeekdays,
+            ctx.client.timezone,
+            ctx.now,
+            companionRec.recurrenceUntil,
+          )
+        : firstAnchor.getTime() > ctx.now.getTime()
+          ? firstAnchor
+          : null;
+      if (reminderAt) {
         try {
           await ctx.repo.createTask({
             title: input.title, // the cron prefixes "⏰ Reminder:" — don't double it
@@ -198,9 +237,12 @@ export const createCalendarEvent = defineTool({
             reminderAt,
             sourceEventId: event.seriesId ?? event.id,
             reminderLeadMinutes: input.reminder_minutes_before,
-            ...(companionRec ?? {}),
+            // Pin the companion to the event's zone so its pings don't drift
+            // relative to the meeting when the client travels across a DST change.
+            ...(companionRec
+              ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: ctx.client.timezone }
+              : {}),
           });
-          // Only say "each time" when the ping actually recurs.
           reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before${companionRec ? ' each time' : ''}.`;
         } catch {
           // The event IS on the calendar; only the companion reminder failed.
@@ -210,9 +252,8 @@ export const createCalendarEvent = defineTool({
             " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)";
         }
       } else {
-        // The lead time is already in the past (e.g. booking a meeting that
-        // starts in under `reminder_minutes_before`). Never claim a reminder we
-        // didn't set — tell the client plainly.
+        // Non-recurring meeting whose lead time is already past — never claim a
+        // reminder we didn't set.
         reminderNote = ` (The meeting is under ${input.reminder_minutes_before} min away, so I didn't set a separate reminder.)`;
       }
     }
@@ -318,6 +359,9 @@ export const updateCalendarEvent = defineTool({
       ...rest,
       start: patchStart,
       end: patchEnd,
+      // Stamp the client's live zone so a moved event reflects a same-turn
+      // travel switch (only applied by the gateway when start/end change).
+      timeZone: tz,
       ...(attendees !== undefined ? { attendees } : {}),
       ...(send_invites !== undefined ? { sendInvites: send_invites } : {}),
     });
@@ -334,17 +378,34 @@ export const updateCalendarEvent = defineTool({
       try {
         await ctx.repo.deleteEventReminders(seriesId);
         if (desiredLead && desiredLead > 0) {
-          const remAt = new Date(event.start.getTime() - desiredLead * 60_000);
-          if (remAt.getTime() > ctx.now.getTime()) {
-            // Preserve recurrence on a move so a recurring meeting keeps pinging
-            // before EVERY occurrence, not just the next one.
-            const rec = existingReminder?.recurrenceFreq
+          const firstAnchor = new Date(event.start.getTime() - desiredLead * 60_000);
+          const recFreq = existingReminder?.recurrenceFreq;
+          // Preserve recurrence so a recurring meeting keeps pinging before EVERY
+          // occurrence. For a series whose master (DTSTART) is in the PAST — the
+          // common case when adding a reminder to an established standup — arm the
+          // next FUTURE occurrence rather than dropping the whole reminder series.
+          const remAt = recFreq
+            ? firstFutureOccurrence(
+                firstAnchor,
+                recFreq,
+                existingReminder.recurrenceInterval ?? 1,
+                existingReminder.recurrenceWeekdays,
+                ctx.client.timezone,
+                ctx.now,
+                existingReminder.recurrenceUntil,
+              )
+            : firstAnchor.getTime() > ctx.now.getTime()
+              ? firstAnchor
+              : null;
+          if (remAt) {
+            const rec = recFreq
               ? {
-                  recurrenceFreq: existingReminder.recurrenceFreq,
+                  recurrenceFreq: recFreq,
                   recurrenceInterval: existingReminder.recurrenceInterval ?? 1,
                   recurrenceWeekdays: existingReminder.recurrenceWeekdays,
                   recurrenceUntil: existingReminder.recurrenceUntil,
-                  recurrenceAnchor: remAt,
+                  recurrenceAnchor: firstAnchor,
+                  recurrenceTimezone: ctx.client.timezone,
                 }
               : {};
             await ctx.repo.createTask({
@@ -355,7 +416,7 @@ export const updateCalendarEvent = defineTool({
               reminderLeadMinutes: desiredLead,
               ...rec,
             });
-            reminderNote = ` Reminder set ${desiredLead} min before${existingReminder?.recurrenceFreq ? ' each time' : ''}.`;
+            reminderNote = ` Reminder set ${desiredLead} min before${recFreq ? ' each time' : ''}.`;
           } else if (event.start.getTime() > ctx.now.getTime()) {
             reminderNote = ` (Heads up: ${desiredLead} min before is already past, so I didn't set a separate reminder for it.)`;
           }

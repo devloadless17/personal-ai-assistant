@@ -1,4 +1,10 @@
-import { isOffsetlessIso, isoInTz, nextOccurrence, withClientOffset } from './time';
+import {
+  firstFutureOccurrence,
+  isOffsetlessIso,
+  isoInTz,
+  nextOccurrence,
+  withClientOffset,
+} from './time';
 
 /**
  * The timezone guarantee: a wall-clock time with no offset must be interpreted
@@ -95,5 +101,45 @@ describe('nextOccurrence — recurring reminders (client-tz, DST-safe)', () => {
     expect(localDate(apr)).toBe('2026-04-30');
     const may = nextOccurrence(apr, 'MONTHLY', 1, [], TZ, anchor);
     expect(localDate(may)).toBe('2026-05-31');
+  });
+});
+
+describe('firstFutureOccurrence — arm a recurring reminder whose anchor is past', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (iso: string): Date => new Date(withClientOffset(iso, TZ));
+
+  it('returns the anchor unchanged when it is already in the future', () => {
+    const anchor = at('2026-07-20T09:00:00');
+    const now = at('2026-07-18T09:00:00');
+    expect(firstFutureOccurrence(anchor, 'DAILY', 1, [], TZ, now)).toEqual(anchor);
+  });
+
+  it('skips past daily occurrences to the next FUTURE one (never drops the series)', () => {
+    // Standup reminder anchored 3 days ago at 08:45; now is today 10:00.
+    const anchor = at('2026-07-15T08:45:00');
+    const now = at('2026-07-18T10:00:00');
+    const next = firstFutureOccurrence(anchor, 'DAILY', 1, [], TZ, now);
+    expect(next).not.toBeNull();
+    // Same 08:45 wall-clock, first day strictly after now → 2026-07-19 08:45.
+    expect(isoInTz(next as Date, TZ).slice(0, 16)).toBe('2026-07-19T08:45');
+  });
+
+  it('returns null when the series ended (past its until)', () => {
+    const anchor = at('2026-07-01T08:45:00');
+    const now = at('2026-07-18T10:00:00');
+    const until = at('2026-07-10T00:00:00');
+    expect(firstFutureOccurrence(anchor, 'DAILY', 1, [], TZ, now, until)).toBeNull();
+  });
+
+  it('weekly: lands on the correct weekday strictly after now', () => {
+    // Anchor was a past Friday; expect the next Friday after now.
+    const anchor = at('2026-07-03T09:00:00'); // Fri
+    const now = at('2026-07-18T10:00:00'); // Sat
+    const next = firstFutureOccurrence(anchor, 'WEEKLY', 1, [5], TZ, now);
+    expect(next).not.toBeNull();
+    expect(isoInTz(next as Date, TZ).slice(0, 10)).toBe('2026-07-24'); // next Friday
+    expect(
+      new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(next as Date),
+    ).toBe('Fri');
   });
 });

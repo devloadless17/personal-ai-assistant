@@ -73,7 +73,7 @@ export const forgetMemory = defineTool({
 export const setReminderPreference = defineTool({
   name: 'set_reminder_preference',
   description:
-    'Update the client\'s standing preferences: their default reminder lead time (minutes before a task is due) and/or the hour their daily summary is sent. Use when the client says things like "always remind me 30 minutes before" or "send my morning summary at 8".',
+    'Update the client\'s standing preferences: default reminder lead time (minutes before a task is due), the hour their daily summary is sent, and/or their default meeting length. Use when the client says things like "always remind me 30 minutes before", "send my morning summary at 8", or "my meetings are usually 2 hours".',
   schema: z.object({
     default_reminder_minutes: z
       .number()
@@ -91,6 +91,15 @@ export const setReminderPreference = defineTool({
       .describe(
         "Hour (0–23, 24-hour, the client's local time) to send the daily summary. CONVERT AM/PM correctly: 8am=8, noon=12, 11pm=23, midnight=0. If the client gives a bare hour with no am/pm (e.g. 'at 11'), briefly confirm morning vs evening before setting it.",
       ),
+    default_meeting_minutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(1440)
+      .optional()
+      .describe(
+        'New default meeting/event length in minutes, applied when the client names only a start time. E.g. "my meetings are 2 hours" → 120. A single event can still be shorter/longer when the client says so.',
+      ),
   }),
   async execute(input, ctx) {
     const parts: string[] = [];
@@ -105,6 +114,13 @@ export const setReminderPreference = defineTool({
     if (input.daily_summary_hour !== undefined) {
       await ctx.repo.setDailyBriefHour(input.daily_summary_hour);
       parts.push(`daily summary at ${input.daily_summary_hour}:00`);
+    }
+    if (input.default_meeting_minutes !== undefined) {
+      await ctx.repo.setDefaultMeetingMinutes(input.default_meeting_minutes);
+      // Mutate in-turn so a same-message "my meetings are 2h, book one at 3pm"
+      // uses the new default when the event is created later this turn.
+      ctx.client.defaultMeetingMinutes = input.default_meeting_minutes;
+      parts.push(`default meeting length ${input.default_meeting_minutes} min`);
     }
     if (parts.length === 0) return 'ERROR: no preference provided. Nothing changed.';
     return `Preferences updated: ${parts.join(', ')}.`;

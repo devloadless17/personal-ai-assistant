@@ -40,7 +40,9 @@ export class DevController {
     } catch {
       throw new NotFoundException(`Unknown IANA timezone: ${input.timezone}`);
     }
-    const client = await this.prisma.client.create({ data: input });
+    const client = await this.prisma.client.create({
+      data: { ...input, homeTimezone: input.timezone },
+    });
     return { id: client.id, name: client.name };
   }
 

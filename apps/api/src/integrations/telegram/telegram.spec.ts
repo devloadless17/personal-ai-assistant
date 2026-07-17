@@ -11,6 +11,7 @@ import type { TenancyService } from '../../tenancy/tenancy.service';
 import type { AgentService } from '../../agent/agent.service';
 import type { ClientScopedRepository } from '../../tenancy/client-scoped-repository';
 import type { OpenAiTranscriptionService } from '../openai/openai-transcription.service';
+import type { TimezoneService } from '../../timezone/timezone.service';
 
 // A realistic cuid — the controller rejects non-cuid ids before any DB work.
 const CID = 'ckabc123def456ghi789jkl01';
@@ -29,8 +30,16 @@ const CLIENT: Client = {
   telegramBotUsername: null,
   telegramBindCode: null,
   defaultReminderMinutes: 15,
+  defaultMeetingMinutes: 60,
   dailyBriefHour: 7,
   lastBriefDate: null,
+  lastBriefAt: null,
+  homeTimezone: 'UTC',
+  googleTimezone: null,
+  timezonePinned: false,
+  timezoneSource: null,
+  timezoneUpdatedAt: null,
+  lastTimezoneSyncAt: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -157,6 +166,10 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
       },
       transcribe,
     } as unknown as OpenAiTranscriptionService;
+    // Default: sync is a no-op (not connected / throttled) — timezone unchanged.
+    const timezone = {
+      sync: jest.fn().mockResolvedValue({ synced: false }),
+    } as unknown as TimezoneService;
     const processor = new TelegramUpdateProcessor(
       prisma,
       tenancy,
@@ -164,6 +177,7 @@ describe('TelegramUpdateProcessor — dedup, binding, serialization', () => {
       telegram,
       fakeCrypto,
       transcription,
+      timezone,
     );
     return { processor, sent, saveMessage, respond, transcribe, hasInboundForUpdate };
   }

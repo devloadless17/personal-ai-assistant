@@ -45,7 +45,28 @@ model Client {
   id        String       @id @default(cuid())
   name      String
   status    ClientStatus @default(active)
+  /// The client's CURRENT effective IANA timezone — read live by every timing
+  /// surface (brief, reminders, calendar, model-input anchoring). For a traveler
+  /// this follows where they are; for a stationary client it equals homeTimezone.
   timezone  String // IANA, e.g. "Asia/Riyadh"
+
+  // ── Travel-aware timezone tracking ───────────────────────────────────────
+  /// The client's base/home zone. Backfilled = timezone for existing rows.
+  /// "back home" reverts `timezone` to this; used as the "away" signal.
+  homeTimezone String?
+  /// Last timezone value READ from the client's Google Calendar setting. Used to
+  /// detect a real MOVE (googleTimezone changed) exactly once. Null until the
+  /// first sync captures a baseline (which never switches/announces).
+  googleTimezone String?
+  /// When true, ignore Google auto-sync ("keep me on Beirut time"). The client
+  /// unpins with "follow my location".
+  timezonePinned Boolean @default(false)
+  /// Provenance of the current `timezone`: 'google' | 'manual' | null (admin).
+  timezoneSource String?
+  /// When `timezone` last changed — for the away-too-long nudge + observability.
+  timezoneUpdatedAt DateTime?
+  /// Throttle marker + optimistic-concurrency guard for TimezoneService.sync.
+  lastTimezoneSyncAt DateTime?
 
   /// The client's Gmail — set by the admin. Enables the client to log into
   /// their self-service portal via "Sign in with Google". Unique so one
@@ -84,12 +105,21 @@ model Client {
   /// override it per task in chat. 0 = don't add reminders automatically.
   defaultReminderMinutes Int @default(15)
 
+  /// Default meeting/event length in minutes when the client names only a start
+  /// ("book a call at 3pm"). The client can change it ("my meetings are 2 hours")
+  /// and override per event ("just 30 minutes"). Applied server-side.
+  defaultMeetingMinutes Int @default(60)
+
   // ── Daily brief ──────────────────────────────────────────────────────────
   /// Local hour (0-23) to send the morning brief
   dailyBriefHour Int @default(7)
   /// Last local date ("YYYY-MM-DD" in the client's tz) a brief was sent —
   /// idempotency marker so restarts/re-runs can never double-send
   lastBriefDate String?
+  /// Instant the last brief was sent. Monotonic guard: with lastBriefDate alone,
+  /// a westward timezone move (e.g. Tokyo→LA) makes the local date go BACKWARDS
+  /// and would re-send the day's brief. Require >= 20h since this before sending.
+  lastBriefAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -146,6 +176,9 @@ model Task {
   /// recurrence computes each occurrence's day-of-month from this so a "31st"
   /// reminder recovers to the 31st after a short month, never drifting to the 28th.
   recurrenceAnchor   DateTime?
+  /// Fixed IANA zone this recurrence is pinned to ("8am Beirut time daily").
+  /// Null = follow the client's CURRENT timezone (e.g. "vitamins every morning").
+  recurrenceTimezone String?
 
   notes String?
 

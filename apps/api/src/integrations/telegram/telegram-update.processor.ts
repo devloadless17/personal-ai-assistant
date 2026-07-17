@@ -6,6 +6,7 @@ import { CryptoService } from '../../crypto/crypto.service';
 import { OpenAiTranscriptionService } from '../openai/openai-transcription.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenancyService } from '../../tenancy/tenancy.service';
+import { TimezoneService } from '../../timezone/timezone.service';
 import { TelegramService } from './telegram.service';
 import type { TelegramUpdate } from './telegram.types';
 
@@ -56,6 +57,7 @@ export class TelegramUpdateProcessor {
     private readonly telegram: TelegramService,
     private readonly crypto: CryptoService,
     private readonly transcription: OpenAiTranscriptionService,
+    private readonly timezone: TimezoneService,
   ) {}
 
   /** Fire-and-forget from the controller; work is chained per client. */
@@ -175,6 +177,19 @@ export class TelegramUpdateProcessor {
         return;
       }
       throw err;
+    }
+
+    // Opportunistic timezone sync BEFORE the agent runs, so this turn (prompt
+    // {{NOW}}, datetime anchoring, calendar stamping) interprets the message in
+    // the client's CURRENT zone if they've traveled. Throttled + best-effort:
+    // never let it block or fail the reply. Only `timezone` matters for the turn.
+    try {
+      const tz = await this.timezone.sync(client);
+      if (tz.synced && tz.switched) client = { ...client, timezone: tz.to };
+    } catch (err) {
+      this.logger.debug(
+        `Timezone sync skipped for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Show "typing…" while the agent works — makes multi-tool turns feel live.

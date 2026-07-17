@@ -74,7 +74,11 @@ export class AdminClientsService {
     dailyBriefHour?: number;
   }): Promise<ClientSummary> {
     this.assertValidTimezone(data.timezone);
-    const client = await this.prisma.client.create({ data });
+    // Seed homeTimezone from the initial zone so travel detection + "back home"
+    // work immediately for new clients (the migration backfills existing rows).
+    const client = await this.prisma.client.create({
+      data: { ...data, homeTimezone: data.timezone },
+    });
     this.logger.log(`Client created: ${client.id} (${client.name})`);
     return summarize(client);
   }
@@ -93,7 +97,12 @@ export class AdminClientsService {
   ): Promise<ClientSummary> {
     if (data.timezone) this.assertValidTimezone(data.timezone);
     try {
-      const client = await this.prisma.client.update({ where: { id }, data });
+      // An admin setting the timezone is authoritatively (re)setting the base
+      // zone → keep homeTimezone in step so "back home" and away-detection align.
+      const client = await this.prisma.client.update({
+        where: { id },
+        data: data.timezone ? { ...data, homeTimezone: data.timezone } : data,
+      });
       return summarize(client);
     } catch {
       throw new NotFoundException('Client not found');

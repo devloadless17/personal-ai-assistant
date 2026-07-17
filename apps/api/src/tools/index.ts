@@ -8,6 +8,7 @@ import {
   getCalendarEvents,
   updateCalendarEvent,
 } from './calendar.tools';
+import { setTimezone } from './timezone.tools';
 
 /**
  * The tool registry. Adding a capability = create the tool file and add one
@@ -32,4 +33,6 @@ export const ALL_TOOLS: ToolDefinition<never>[] = [
   saveMemory,
   forgetMemory,
   setReminderPreference,
+  // Appended at the END — tool order is part of the prompt-cache prefix.
+  setTimezone,
 ] as ToolDefinition<never>[];

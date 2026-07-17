@@ -8,6 +8,18 @@ import { z } from 'zod';
  * - All timestamps are DISPLAYED in the client's IANA timezone.
  */
 
+/** True if `tz` is an IANA zone the runtime knows (e.g. "Asia/Beirut"). The one
+ * place timezone validity is decided — reused by admin input, the set_timezone
+ * tool, and TimezoneService so a bad zone can never reach the scheduling math. */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** ISO 8601 datetime string → Date, rejecting anything unparsable. */
 export const isoDateTime = z
   .string()
@@ -120,6 +132,37 @@ export function endOfTodayInTz(now: Date, timeZone: string): Date {
 }
 
 export type RecurrenceFreq = 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+/**
+ * The first occurrence of a series that is strictly AFTER `now` — used to arm a
+ * recurring reminder whose original first occurrence is already in the past
+ * (e.g. adding a reminder to a standup that started weeks ago). Without this a
+ * recurring companion whose anchor is past would be dropped entirely (never
+ * created) — silently losing every future ping. Returns null if the series has
+ * no future occurrence (ended, or its `until` has passed). Keeps `anchor` as the
+ * immutable series anchor so monthly day-of-month stays stable.
+ */
+export function firstFutureOccurrence(
+  anchor: Date,
+  freq: RecurrenceFreq,
+  interval: number,
+  weekdays: number[],
+  timeZone: string,
+  now: Date,
+  until?: Date | null,
+): Date | null {
+  const past = (d: Date): boolean => d.getTime() <= now.getTime();
+  const beyond = (d: Date): boolean => until != null && d.getTime() > until.getTime();
+  if (!past(anchor)) return beyond(anchor) ? null : anchor;
+  let next = anchor;
+  for (let i = 0; i < 2000 && past(next); i++) {
+    const after = nextOccurrence(next, freq, interval, weekdays, timeZone, anchor);
+    if (after.getTime() <= next.getTime()) return null; // safety: no progress
+    next = after;
+  }
+  if (past(next) || beyond(next)) return null;
+  return next;
+}
 
 /**
  * The next occurrence of a recurring reminder AFTER `current`, computed in the

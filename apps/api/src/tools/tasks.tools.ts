@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { RecurrenceFreq, Task } from '@prisma/client';
 import { defineTool } from './tool.types';
-import { formatInTz, isoDateTime } from './time';
+import { formatInTz, isoDateTime, isValidTimezone } from './time';
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -173,9 +173,18 @@ export const createTask = defineTool({
       .describe(
         'Make it a RECURRING reminder ("every Friday", "every day", "monthly"). The first reminder time (reminder_at or due_at) is the anchor; it re-fires each period.',
       ),
+    recurrence_timezone: z
+      .string()
+      .optional()
+      .describe(
+        'The IANA zone a recurring reminder is anchored to, when the client names one explicitly ("8am BEIRUT time every day", "standup 9am LONDON daily") → e.g. "Asia/Beirut". Omit normally: the reminder is then anchored to the client\'s current zone at creation and keeps that stable local time. (Recurring reminders hold a fixed local time in a fixed zone, like a Google Calendar recurring event.)',
+      ),
     notes: z.string().max(2000).optional().describe('Extra details, if any.'),
   }),
   async execute(input, ctx) {
+    if (input.recurrence_timezone && !isValidTimezone(input.recurrence_timezone)) {
+      return `ERROR: "${input.recurrence_timezone}" isn't a valid timezone. Nothing was created.`;
+    }
     // A RELATIVE reminder ("in 10 minutes") is computed HERE from the current
     // time — never by the model, which botches clock arithmetic (e.g. "10 min
     // from 2:43pm" once became 9:07pm). It behaves like an explicit reminder_at
@@ -223,7 +232,18 @@ export const createTask = defineTool({
       reminderAt,
       notes: input.notes ?? null,
       // Anchor the series on its first occurrence so monthly day-of-month is stable.
-      ...(input.repeat ? { ...repeatToFields(input.repeat), recurrenceAnchor: reminderAt } : {}),
+      // Pin the recurrence to a definite zone: the one the client named, else the
+      // zone they're in now. This keeps a recurring reminder at a STABLE local
+      // time (like Google Calendar anchors a recurring event to a timezone) —
+      // a bare instant would silently drift to a different local time as they
+      // travel (e.g. "8am" becoming 2pm elsewhere).
+      ...(input.repeat
+        ? {
+            ...repeatToFields(input.repeat),
+            recurrenceAnchor: reminderAt,
+            recurrenceTimezone: input.recurrence_timezone ?? ctx.client.timezone,
+          }
+        : {}),
     });
     return `Created: ${renderTask(task, ctx.client.timezone)}`;
   },

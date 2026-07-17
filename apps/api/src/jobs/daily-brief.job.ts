@@ -26,6 +26,11 @@ const BRIEF_CONCURRENCY = 6;
  * The brief is assembled deterministically (no LLM) — a scheduled factual
  * digest must be exactly right, every time.
  */
+/** Minimum spacing between briefs. Guards against a westward timezone move
+ * making the local date go BACKWARDS and re-sending the day's brief. Under 24h
+ * so a legitimate next-day brief is never blocked. */
+const MIN_BRIEF_GAP_MS = 20 * 60 * 60_000;
+
 @Injectable()
 export class DailyBriefJob implements OnApplicationBootstrap {
   private readonly logger = new Logger(DailyBriefJob.name);
@@ -84,13 +89,14 @@ export class DailyBriefJob implements OnApplicationBootstrap {
     // OAuth blobs every 10 min). Phase 2 loads full rows for the due few only.
     const candidates = await this.prisma.client.findMany({
       where: { status: 'active', telegramChatId: { not: null } },
-      select: { id: true, timezone: true, dailyBriefHour: true, lastBriefDate: true },
+      select: { id: true, timezone: true, dailyBriefHour: true, lastBriefDate: true, lastBriefAt: true },
     });
     const dueIds = candidates
       .filter(
         (c) =>
           this.localHour(now, c.timezone) >= c.dailyBriefHour &&
-          c.lastBriefDate !== this.localDate(now, c.timezone),
+          c.lastBriefDate !== this.localDate(now, c.timezone) &&
+          (c.lastBriefAt == null || now.getTime() - c.lastBriefAt.getTime() >= MIN_BRIEF_GAP_MS),
       )
       .map((c) => c.id);
     if (dueIds.length === 0) return;
@@ -104,6 +110,12 @@ export class DailyBriefJob implements OnApplicationBootstrap {
     const localHour = this.localHour(now, client.timezone);
     if (localHour < client.dailyBriefHour) return;
     if (client.lastBriefDate === localDate) return;
+    // Monotonic guard: a westward move can make localDate go backwards; without
+    // this, that re-passes the date check and double-sends. 20h < 24h so the
+    // real next-day brief is never blocked.
+    if (client.lastBriefAt && now.getTime() - client.lastBriefAt.getTime() < MIN_BRIEF_GAP_MS) {
+      return;
+    }
 
     // Atomic claim on (id, lastBriefDate != today). Must handle the never-sent
     // case EXPLICITLY: in SQL `NOT (lastBriefDate = today)` is NULL (not true)
@@ -115,7 +127,7 @@ export class DailyBriefJob implements OnApplicationBootstrap {
         id: client.id,
         OR: [{ lastBriefDate: null }, { lastBriefDate: { not: localDate } }],
       },
-      data: { lastBriefDate: localDate },
+      data: { lastBriefDate: localDate, lastBriefAt: now },
     });
     if (count === 0) return;
 
@@ -134,7 +146,7 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       // Revert the claim so a later tick today retries.
       await this.prisma.client.updateMany({
         where: { id: client.id, lastBriefDate: localDate },
-        data: { lastBriefDate: client.lastBriefDate },
+        data: { lastBriefDate: client.lastBriefDate, lastBriefAt: client.lastBriefAt },
       });
       this.logger.error(
         `Daily brief failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,

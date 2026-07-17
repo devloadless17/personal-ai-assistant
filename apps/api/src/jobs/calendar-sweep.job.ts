@@ -8,6 +8,7 @@ import { GoogleCalendarGateway } from '../integrations/google/google-calendar.ga
 import { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TimezoneService } from '../timezone/timezone.service';
 import type { CalendarEvent } from '../tools/tool.types';
 import { formatInTz } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
@@ -57,6 +58,7 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
     private readonly crypto: CryptoService,
     private readonly telegram: TelegramService,
     private readonly alerts: AdminAlertService,
+    private readonly timezone: TimezoneService,
   ) {}
 
   /** Run once on boot so double-bookings are surfaced right after a deploy and
@@ -118,6 +120,24 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
 
   private async sweepClient(client: Client, now: Date): Promise<void> {
     try {
+      // Piggyback the periodic timezone sync here (this job already reads each
+      // connected client's Google hourly). On an auto-detected move, tell the
+      // client and use the fresh zone for the rest of this sweep.
+      const tz = await this.timezone.sync(client);
+      if (tz.synced && tz.switched) {
+        client = { ...client, timezone: tz.to };
+        const botToken = client.telegramBotTokenEnc
+          ? this.crypto.decrypt(client.telegramBotTokenEnc)
+          : null;
+        if (botToken && client.telegramChatId) {
+          await this.telegram.sendMessage(
+            botToken,
+            client.telegramChatId,
+            `🌍 Looks like you're on ${tz.to} time now — I've switched your daily brief, reminders and new scheduling to match. Already-booked events keep their original time. Reply "keep home time" to stay on your home zone instead.`,
+          );
+        }
+      }
+
       const auth = await this.google.authorizedClientFor(client);
       if (!auth) return;
       const gateway = new GoogleCalendarGateway(auth, client.timezone);

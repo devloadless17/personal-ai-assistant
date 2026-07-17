@@ -18,6 +18,29 @@ export class GoogleCalendarGateway implements CalendarGateway {
     this.calendar = google.calendar({ version: 'v3', auth });
   }
 
+  /**
+   * The user's timezone as Google Calendar sees it. Google auto-updates this
+   * from the user's phone when "automatic timezone" is on, so it's our passive
+   * signal for detecting travel. Best-effort: ANY failure (API down, revoked,
+   * empty) returns null so the caller no-ops rather than throwing — timezone
+   * sync must never break message handling.
+   */
+  async getUserTimezone(): Promise<string | null> {
+    try {
+      const res = await this.calendar.settings.get({ setting: 'timezone' });
+      const tz = res.data.value?.trim();
+      if (tz) return tz;
+    } catch {
+      // fall through to the calendars.get fallback
+    }
+    try {
+      const res = await this.calendar.calendars.get({ calendarId: 'primary' });
+      return res.data.timeZone?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
   async listEvents(params: { from: Date; to: Date; limit?: number }): Promise<CalendarEvent[]> {
     // Paginate through the whole window (up to `limit`) so a busy month / a wide
     // conflict-scan window never SILENTLY drops events past the first page —
@@ -67,7 +90,9 @@ export class GoogleCalendarGateway implements CalendarGateway {
     attendees?: string[];
     sendInvites?: boolean;
     recurrence?: string[];
+    timeZone?: string;
   }): Promise<CalendarEvent> {
+    const zone = params.timeZone ?? this.timezone;
     const res = await this.calendar.events.insert({
       calendarId: 'primary',
       // sendUpdates 'all' emails the guests; 'none' adds them silently.
@@ -76,8 +101,8 @@ export class GoogleCalendarGateway implements CalendarGateway {
         summary: params.title,
         description: params.description,
         location: params.location,
-        start: { dateTime: params.start.toISOString(), timeZone: this.timezone },
-        end: { dateTime: params.end.toISOString(), timeZone: this.timezone },
+        start: { dateTime: params.start.toISOString(), timeZone: zone },
+        end: { dateTime: params.end.toISOString(), timeZone: zone },
         ...(params.attendees && params.attendees.length > 0
           ? { attendees: params.attendees.map((email) => ({ email })) }
           : {}),
@@ -99,15 +124,17 @@ export class GoogleCalendarGateway implements CalendarGateway {
       location: string;
       attendees: string[];
       sendInvites: boolean;
+      timeZone: string;
     }>,
   ): Promise<CalendarEvent> {
     // PATCH semantics: only the provided fields change.
+    const zone = params.timeZone ?? this.timezone;
     const body: calendar_v3.Schema$Event = {};
     if (params.title !== undefined) body.summary = params.title;
     if (params.description !== undefined) body.description = params.description;
     if (params.location !== undefined) body.location = params.location;
-    if (params.start) body.start = { dateTime: params.start.toISOString(), timeZone: this.timezone };
-    if (params.end) body.end = { dateTime: params.end.toISOString(), timeZone: this.timezone };
+    if (params.start) body.start = { dateTime: params.start.toISOString(), timeZone: zone };
+    if (params.end) body.end = { dateTime: params.end.toISOString(), timeZone: zone };
     if (params.attendees !== undefined) {
       body.attendees = params.attendees.map((email) => ({ email }));
     }

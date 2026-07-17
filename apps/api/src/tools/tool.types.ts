@@ -34,6 +34,9 @@ export interface CalendarGateway {
     sendInvites?: boolean;
     /** Google RRULE strings for a recurring event, e.g. ["RRULE:FREQ=WEEKLY;BYDAY=SA"]. */
     recurrence?: string[];
+    /** IANA zone to stamp on the event. Pass the client's LIVE timezone so a
+     * same-turn travel switch is reflected; defaults to the gateway's zone. */
+    timeZone?: string;
   }): Promise<CalendarEvent>;
   updateEvent(
     eventId: string,
@@ -45,6 +48,8 @@ export interface CalendarGateway {
       location: string;
       attendees: string[];
       sendInvites: boolean;
+      /** IANA zone to stamp when start/end change (client's live timezone). */
+      timeZone: string;
     }>,
   ): Promise<CalendarEvent>;
   deleteEvent(eventId: string): Promise<void>;

@@ -85,6 +85,7 @@ export class ClientScopedRepository {
     recurrenceWeekdays?: number[];
     recurrenceUntil?: Date | null;
     recurrenceAnchor?: Date | null;
+    recurrenceTimezone?: string | null;
   }): Promise<Task> {
     return this.prisma.task.create({ data: { ...data, clientId: this.clientId } });
   }
@@ -176,6 +177,42 @@ export class ClientScopedRepository {
     await this.prisma.client.update({
       where: { id: this.clientId },
       data: { dailyBriefHour: hour },
+    });
+  }
+
+  /** Update the client's default meeting/event length (minutes). */
+  async setDefaultMeetingMinutes(minutes: number): Promise<void> {
+    await this.prisma.client.update({
+      where: { id: this.clientId },
+      data: { defaultMeetingMinutes: minutes },
+    });
+  }
+
+  /**
+   * Set the client's CURRENT (effective) timezone from a conversational
+   * declaration ("I'm in Tokyo"). Marks the source 'manual' and — deliberately —
+   * does NOT touch googleTimezone, so a later real Google-detected move still
+   * wins. Optionally re-home ("this is home now").
+   */
+  async setTimezone(timezone: string, opts?: { setAsHome?: boolean }): Promise<void> {
+    await this.prisma.client.update({
+      where: { id: this.clientId },
+      data: {
+        timezone,
+        timezoneSource: 'manual',
+        timezoneUpdatedAt: new Date(),
+        ...(opts?.setAsHome ? { homeTimezone: timezone } : {}),
+      },
+    });
+  }
+
+  /** Pin/unpin the client to their current zone (ignore Google auto-sync).
+   * Unpinning clears the sync throttle so location-following resumes on the
+   * very next message/sweep instead of waiting out the throttle window. */
+  async setTimezonePinned(pinned: boolean): Promise<void> {
+    await this.prisma.client.update({
+      where: { id: this.clientId },
+      data: { timezonePinned: pinned, ...(pinned ? {} : { lastTimezoneSyncAt: null }) },
     });
   }
 
