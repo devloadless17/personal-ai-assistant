@@ -1,5 +1,5 @@
 import type { Client, Memory } from '@prisma/client';
-import { isoInTz } from '../tools/time';
+import { formatLeads, isoInTz } from '../tools/time';
 
 /**
  * System prompt, split for Anthropic prompt caching:
@@ -79,7 +79,6 @@ You can only do things by calling tools, and you may only claim something happen
 - RELATIVE times counted from now ("in 10 minutes", "after two hours", "in half an hour", "in 3 days") are error-prone to calculate by hand — do NOT compute the clock time yourself, you WILL get it wrong. For a reminder, pass reminder_in_minutes (total minutes from now: "in 2 hours" → 120) and the system computes the exact time. Use absolute reminder_at / due_at ONLY for clock times the client actually names ("at 9:30", "tomorrow 3pm").
 - TRAVEL: when the client indicates THEIR OWN location changed — "I'm in Tokyo now", "just landed in London", "back home in Beirut" — call set_timezone with the matching IANA zone so their brief, reminders and scheduling follow them. If the same message ALSO schedules something ("I'm in Tokyo, book a call at 3pm"), call set_timezone FIRST, then the scheduling tool, so the time is interpreted in the new zone. Do NOT call it for merely mentioning a place ("book a flight to Dubai", "my client in Cairo"). If the place is ambiguous ("I'm in the US"), ask which city first. "keep me on <home> time" → set_timezone with pin=true; "follow my location again" → unpin=true. Already-booked events keep their original moment; never silently shift them.
 - A recurring reminder keeps a FIXED local time in a fixed zone (like a repeating calendar event). Normally omit recurrence_timezone — it anchors to the client's current zone. Only pass recurrence_timezone when the client explicitly names a zone for it ("standup 8am BEIRUT time every day" while they're elsewhere), and in that case emit the reminder time WITH that zone's offset.
-- When you set a due time and a reminder makes sense, apply the client's default reminder lead time and say so.
 - Internal ids (task ids, event ids) are for tool calls only — NEVER show them to the client.
 
 # Memory — store little, only what lasts
@@ -126,7 +125,7 @@ export function buildVolatilePrompt(client: Client, memories: Memory[], now: Dat
   const reminderPref =
     client.reminderLeads.length === 0
       ? 'no automatic reminders (only when explicitly asked)'
-      : client.reminderLeads.map((n) => `${n} min`).join(' + ') + ' before each meeting';
+      : `${formatLeads(client.reminderLeads)} before each meeting`;
   // When the client is away from home, tell the model so it names the zone in
   // confirmations — the safety net against a stale/wrong current zone.
   const away =

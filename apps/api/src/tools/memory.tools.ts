@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from './tool.types';
+import { formatLeads } from './time';
 
 const CATEGORY_LABEL: Record<string, string> = {
   PROFILE: 'Profile',
@@ -114,7 +115,7 @@ export const setReminderPreference = defineTool({
       parts.push(
         clean.length === 0
           ? 'no automatic meeting reminders'
-          : `meeting reminders ${clean.map((n) => `${n} min`).join(' + ')} before`,
+          : `meeting reminders ${formatLeads(clean)} before`,
       );
     }
     if (input.daily_summary_hour !== undefined) {

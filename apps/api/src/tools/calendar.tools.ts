@@ -2,7 +2,14 @@ import { z } from 'zod';
 import { defineTool } from './tool.types';
 import type { CalendarEvent, ToolContext } from './tool.types';
 import { repeatBaseSchema, repeatToFields, repeatToRRule, type RepeatInput } from './tasks.tools';
-import { firstFutureOccurrence, formatInTz, isoDateTime, isoInTz, withClientOffset } from './time';
+import {
+  firstFutureOccurrence,
+  formatInTz,
+  formatLeads,
+  isoDateTime,
+  isoInTz,
+  withClientOffset,
+} from './time';
 
 const NOT_CONNECTED =
   'ERROR: Google Calendar is not connected for this client yet. Tell the client their calendar isn\'t linked and that the administrator can send them a connection link. Do NOT claim any calendar action succeeded.';
@@ -99,26 +106,6 @@ async function conflictWarning(
   return `CONFLICT — nothing was ${opts.verb}. The ${timeWord} time overlaps:\n${out}\nAsk the client whether to pick another time or ${pickVerb} anyway (then retry with allow_conflict=true).`;
 }
 
-/** "60" → "1 hour", "10" → "10 min", "90" → "1h 30m", "1440" → "1 day". */
-function formatLead(min: number): string {
-  if (min % 1440 === 0) {
-    const d = min / 1440;
-    return `${d} day${d > 1 ? 's' : ''}`;
-  }
-  if (min % 60 === 0) {
-    const h = min / 60;
-    return `${h} hour${h > 1 ? 's' : ''}`;
-  }
-  if (min > 60) return `${Math.floor(min / 60)}h ${min % 60}m`;
-  return `${min} min`;
-}
-
-/** [60, 10] → "1 hour and 10 min". */
-function formatLeads(leads: number[]): string {
-  const p = leads.map(formatLead);
-  return p.length <= 1 ? (p[0] ?? '') : `${p.slice(0, -1).join(', ')} and ${p[p.length - 1]}`;
-}
-
 /**
  * Arm ONE companion reminder per lead (minutes before) for a meeting — so a
  * client can have several pings (e.g. an hour before AND ten minutes before).
@@ -144,7 +131,11 @@ async function armEventReminders(
   eventStart: Date,
   leads: number[],
   companionRec: CompanionRecurrence,
+  pinnedZone?: string,
 ): Promise<string> {
+  // The zone a recurring companion is pinned to: the event's original zone when
+  // preserved across a move, else the client's current zone at creation.
+  const zone = pinnedZone ?? ctx.client.timezone;
   const positive = Array.from(new Set(leads.filter((n) => Number.isInteger(n) && n > 0))).sort(
     (a, b) => b - a, // earliest ping first
   );
@@ -160,7 +151,7 @@ async function armEventReminders(
           companionRec.recurrenceFreq,
           companionRec.recurrenceInterval,
           companionRec.recurrenceWeekdays,
-          ctx.client.timezone,
+          zone,
           ctx.now,
           companionRec.recurrenceUntil,
         )
@@ -178,7 +169,7 @@ async function armEventReminders(
         // Pin each companion to the event's zone so pings don't drift vs the
         // meeting when the client travels across a DST change.
         ...(companionRec
-          ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: ctx.client.timezone }
+          ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: zone }
           : {}),
       });
       armed.push(lead);
@@ -236,7 +227,7 @@ export const findFreeTime = defineTool({
 export const createCalendarEvent = defineTool({
   name: 'create_calendar_event',
   description:
-    "Create an event on the client's Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms). Set reminder_minutes_before to also send the client a Telegram reminder before the meeting — use their default lead time unless they say otherwise. Add attendees to include other people; set send_invites ONLY when the client explicitly asks to invite/notify them.",
+    "Create an event on the client's Google Calendar. ONLY for meetings and genuinely time-blocked important events — ordinary tasks belong in create_task. Automatically refuses double-bookings unless allow_conflict is true (set it only after the client explicitly confirms). The client's default reminder(s) are added AUTOMATICALLY — normally OMIT reminder_minutes_before; set it (a list) only for DIFFERENT reminders on THIS meeting, or [] to turn them off. Add attendees to include other people; set send_invites ONLY when the client explicitly asks to invite/notify them.",
   schema: z.object({
     title: z.string().min(1).max(300),
     start: isoDateTime.describe('Event start (ISO 8601).'),
@@ -448,6 +439,12 @@ export const updateCalendarEvent = defineTool({
     // Read existing companions up front so a move can PRESERVE all their leads +
     // recurrence.
     const existing = await ctx.repo.getEventReminders(seriesId);
+    // Companion reminders are SERIES-level (one recurring row per lead). Only
+    // touch them for a whole-series change (or a one-off event). For a
+    // single-occurrence edit, leave the series' reminders exactly as they are —
+    // rewriting them by the master id would wipe or re-time every occurrence's
+    // pings from one "just this one" request.
+    const touchCompanions = applyToSeries || !current.recurring;
     // Desired leads: an explicit new list wins; otherwise, if the time changed,
     // preserve the existing leads (moved with the event). If neither, leave
     // reminders untouched.
@@ -457,10 +454,11 @@ export const updateCalendarEvent = defineTool({
       desiredLeads = existing
         .map((e) => e.reminderLeadMinutes)
         .filter((n): n is number => n != null);
-    if (desiredLeads !== undefined) {
+    if (touchCompanions && desiredLeads !== undefined) {
       try {
         await ctx.repo.deleteEventReminders(seriesId);
-        // Preserve the series' recurrence (all companions share the event's).
+        // Preserve the series' recurrence AND its pinned zone (all companions
+        // share the event's), so a move doesn't drift the recurring pings.
         const src = existing.find((e) => e.recurrenceFreq);
         const companionRec: CompanionRecurrence = src?.recurrenceFreq
           ? {
@@ -470,9 +468,17 @@ export const updateCalendarEvent = defineTool({
               recurrenceUntil: src.recurrenceUntil,
             }
           : null;
+        const zone = src?.recurrenceTimezone ?? undefined;
         const positive = desiredLeads.filter((n) => n > 0);
         if (positive.length > 0) {
-          reminderNote = await armEventReminders(ctx, event, event.start, positive, companionRec);
+          reminderNote = await armEventReminders(
+            ctx,
+            event,
+            event.start,
+            positive,
+            companionRec,
+            zone,
+          );
         } else if (reminder_minutes_before !== undefined) {
           reminderNote = ' Reminders removed.';
         }
@@ -520,8 +526,13 @@ export const deleteCalendarEvent = defineTool({
     const applyToSeries = (existing.recurring ?? false) && input.apply_to !== 'this_event';
     const targetId = applyToSeries ? (existing.seriesId ?? input.event_id) : input.event_id;
     await ctx.calendar.deleteEvent(targetId);
-    // Cancel the companion reminder keyed on the SERIES master id.
-    await ctx.repo.deleteEventReminders(existing.seriesId ?? input.event_id);
+    // Companion reminders are series-level (one recurring row per lead). Only
+    // remove them when the WHOLE series is cancelled (or it's a one-off). For a
+    // single-occurrence cancel, LEAVE the series reminders intact — deleting them
+    // by the master id would wipe reminders for every remaining occurrence.
+    if (applyToSeries || !existing.recurring) {
+      await ctx.repo.deleteEventReminders(existing.seriesId ?? input.event_id);
+    }
     const scope = applyToSeries
       ? ' (whole recurring series)'
       : existing.recurring

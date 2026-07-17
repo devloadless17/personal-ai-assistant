@@ -538,6 +538,77 @@ describe('calendar tools — conflict gating & honesty', () => {
     expect(delCalls).toContain('evt');
   });
 
+  it('cancelling ONE occurrence (apply_to:this_event) does NOT wipe the whole series reminders', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260725T090000Z',
+      seriesId: 'evt',
+      title: 'Standup',
+      start: new Date('2026-07-25T09:00:00Z'),
+      end: new Date('2026-07-25T09:15:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const ctx = ctxWith(gw);
+    const delCalls: string[] = [];
+    (ctx.repo as unknown as { deleteEventReminders: jest.Mock }).deleteEventReminders = jest
+      .fn()
+      .mockImplementation((id: string) => {
+        delCalls.push(id);
+        return Promise.resolve();
+      });
+    await deleteCalendarEvent.execute(
+      { event_id: 'evt_20260725T090000Z', apply_to: 'this_event' },
+      ctx,
+    );
+    expect(gw.deleted).toEqual(['evt_20260725T090000Z']); // only the instance in Google
+    expect(delCalls).toEqual([]); // series companions LEFT INTACT (the bug fix)
+  });
+
+  it('editing ONE occurrence (apply_to:this_event) does NOT rewrite the series reminders', async () => {
+    const instance: CalendarEvent = {
+      id: 'evt_20260725T090000Z',
+      seriesId: 'evt',
+      title: 'Standup',
+      start: new Date('2026-07-25T09:00:00Z'),
+      end: new Date('2026-07-25T09:15:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const created: unknown[] = [];
+    const del: string[] = [];
+    const ctx = {
+      repo: {
+        createTask: jest.fn((d: unknown) => {
+          created.push(d);
+          return Promise.resolve({});
+        }),
+        deleteEventReminders: jest.fn((id: string) => {
+          del.push(id);
+          return Promise.resolve();
+        }),
+        getEventReminders: jest.fn().mockResolvedValue([
+          { reminderLeadMinutes: 60, recurrenceFreq: 'DAILY', recurrenceInterval: 1, recurrenceWeekdays: [], recurrenceUntil: null, recurrenceTimezone: 'UTC' },
+        ]),
+      } as unknown as ClientScopedRepository,
+      client: CLIENT,
+      now: new Date('2026-07-24T09:00:00Z'),
+      calendar: gw,
+    } as ToolContext;
+    await updateCalendarEvent.execute(
+      {
+        event_id: 'evt_20260725T090000Z',
+        apply_to: 'this_event',
+        start: new Date('2026-07-25T11:00:00Z'),
+        end: new Date('2026-07-25T11:15:00Z'),
+      },
+      ctx,
+    );
+    expect(del).toEqual([]); // series companions untouched
+    expect(created).toEqual([]); // not re-anchored to the moved instance
+  });
+
   it('every calendar tool answers honestly when Google is not connected', async () => {
     const ctx = ctxWith(undefined);
     const results = await Promise.all([

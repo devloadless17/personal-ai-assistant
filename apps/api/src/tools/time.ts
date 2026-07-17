@@ -131,6 +131,27 @@ export function endOfTodayInTz(now: Date, timeZone: string): Date {
   return utcForLocalMidnight(localYmd(nextish, timeZone), timeZone);
 }
 
+/** A minutes value as natural language: 60 → "1 hour", 10 → "10 min",
+ * 90 → "1h 30m", 1440 → "1 day". Used for reminder lead times. */
+export function formatLead(min: number): string {
+  if (min % 1440 === 0) {
+    const d = min / 1440;
+    return `${d} day${d > 1 ? 's' : ''}`;
+  }
+  if (min % 60 === 0) {
+    const h = min / 60;
+    return `${h} hour${h > 1 ? 's' : ''}`;
+  }
+  if (min > 60) return `${Math.floor(min / 60)}h ${min % 60}m`;
+  return `${min} min`;
+}
+
+/** A list of minutes as natural language: [60, 10] → "1 hour and 10 min". */
+export function formatLeads(leads: number[]): string {
+  const p = leads.map(formatLead);
+  return p.length <= 1 ? (p[0] ?? '') : `${p.slice(0, -1).join(', ')} and ${p[p.length - 1]}`;
+}
+
 export type RecurrenceFreq = 'DAILY' | 'WEEKLY' | 'MONTHLY';
 
 /**
