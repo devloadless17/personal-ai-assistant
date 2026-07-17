@@ -73,15 +73,15 @@ export const forgetMemory = defineTool({
 export const setReminderPreference = defineTool({
   name: 'set_reminder_preference',
   description:
-    'Update the client\'s standing preferences: default reminder lead time (minutes before a task is due), the hour their daily summary is sent, and/or their default meeting length. Use when the client says things like "always remind me 30 minutes before", "send my morning summary at 8", or "my meetings are usually 2 hours".',
+    'Update the client\'s standing preferences: their default meeting reminder lead times, the hour their daily summary is sent, and/or their default meeting length. Use when the client says things like "always remind me an hour and 10 minutes before", "just one reminder 15 min before", "send my morning summary at 8", or "my meetings are usually 2 hours".',
   schema: z.object({
-    default_reminder_minutes: z
-      .number()
-      .int()
-      .min(0)
-      .max(1440)
+    reminder_leads: z
+      .array(z.number().int().min(0).max(10080))
+      .max(5)
       .optional()
-      .describe('New default reminder lead time in minutes (0 = no automatic reminders).'),
+      .describe(
+        'New default reminder lead times (minutes before a meeting) — the client gets ONE ping per value. "an hour and 10 min before" → [60, 10]; "just 15 min before" → [15]; "drop the hour one, keep 10 min" → [10]; "no automatic reminders" → []. Sets the WHOLE list (replaces the old one).',
+      ),
     daily_summary_hour: z
       .number()
       .int()
@@ -103,12 +103,18 @@ export const setReminderPreference = defineTool({
   }),
   async execute(input, ctx) {
     const parts: string[] = [];
-    if (input.default_reminder_minutes !== undefined) {
-      await ctx.repo.setDefaultReminderMinutes(input.default_reminder_minutes);
+    if (input.reminder_leads !== undefined) {
+      await ctx.repo.setReminderLeads(input.reminder_leads);
+      // Mutate in-turn so a same-message "remind me 1h & 10m before, book a
+      // meeting at 3pm" applies the new defaults to the event created this turn.
+      const clean = Array.from(
+        new Set(input.reminder_leads.filter((n) => Number.isInteger(n) && n > 0)),
+      ).sort((a, b) => b - a);
+      ctx.client.reminderLeads = clean;
       parts.push(
-        input.default_reminder_minutes === 0
-          ? 'no automatic reminders'
-          : `reminders ${input.default_reminder_minutes} min before due`,
+        clean.length === 0
+          ? 'no automatic meeting reminders'
+          : `meeting reminders ${clean.map((n) => `${n} min`).join(' + ')} before`,
       );
     }
     if (input.daily_summary_hour !== undefined) {

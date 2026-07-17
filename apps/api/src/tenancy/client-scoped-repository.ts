@@ -128,6 +128,32 @@ export class ClientScopedRepository {
     return t ?? null;
   }
 
+  /** ALL companion reminders for an event (a meeting can have several — e.g. an
+   * hour before AND ten minutes before). Used to preserve every lead + its
+   * recurrence when a meeting is moved. */
+  async getEventReminders(eventId: string): Promise<
+    {
+      reminderLeadMinutes: number | null;
+      recurrenceFreq: RecurrenceFreq | null;
+      recurrenceInterval: number | null;
+      recurrenceWeekdays: number[];
+      recurrenceUntil: Date | null;
+      recurrenceTimezone: string | null;
+    }[]
+  > {
+    return this.prisma.task.findMany({
+      where: { clientId: this.clientId, sourceEventId: eventId },
+      select: {
+        reminderLeadMinutes: true,
+        recurrenceFreq: true,
+        recurrenceInterval: true,
+        recurrenceWeekdays: true,
+        recurrenceUntil: true,
+        recurrenceTimezone: true,
+      },
+    });
+  }
+
   /** Returns the updated task, or null if no row matched (id AND clientId). */
   async updateTask(
     id: string,
@@ -177,6 +203,19 @@ export class ClientScopedRepository {
     await this.prisma.client.update({
       where: { id: this.clientId },
       data: { dailyBriefHour: hour },
+    });
+  }
+
+  /** Set the client's default reminder lead times (minutes before a meeting).
+   * Each value = one Telegram ping; [] = no automatic reminders. Normalized:
+   * de-duped, positives only, sorted largest-first (earliest ping first). */
+  async setReminderLeads(leads: number[]): Promise<void> {
+    const clean = Array.from(new Set(leads.filter((n) => Number.isInteger(n) && n > 0))).sort(
+      (a, b) => b - a,
+    );
+    await this.prisma.client.update({
+      where: { id: this.clientId },
+      data: { reminderLeads: clean },
     });
   }
 

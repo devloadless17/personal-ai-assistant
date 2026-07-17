@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from './tool.types';
 import type { CalendarEvent, ToolContext } from './tool.types';
-import { repeatBaseSchema, repeatToFields, repeatToRRule } from './tasks.tools';
+import { repeatBaseSchema, repeatToFields, repeatToRRule, type RepeatInput } from './tasks.tools';
 import { firstFutureOccurrence, formatInTz, isoDateTime, isoInTz, withClientOffset } from './time';
 
 const NOT_CONNECTED =
@@ -45,18 +45,37 @@ export const getCalendarEvents = defineTool({
   },
 });
 
+const normalizeTitle = (s: string): string => s.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * Full client-facing guidance when [start,end) clashes with existing events, or
+ * null if it's free. Two shapes:
+ * - DUPLICATE: a clash whose title matches `title` is almost certainly the SAME
+ *   meeting (e.g. a re-ask after it already booked) — say that, don't offer new
+ *   slots. This is a UX fix, not a scheduling clash.
+ * - CLASH: a genuine overlap with a differently-named event → list it + the
+ *   nearest open slots so the assistant can offer alternatives in one shot.
+ * `verb` = "created" (create) or "changed" (move) so the message reads right.
+ */
 async function conflictWarning(
   ctx: ToolContext,
   start: Date,
   end: Date,
-  excludeEventId?: string,
+  opts: { verb: 'created' | 'changed'; excludeEventId?: string; title?: string },
 ): Promise<string | null> {
   if (!ctx.calendar) return null;
-  const conflicts = await ctx.calendar.findConflicts(start, end, excludeEventId);
+  const conflicts = await ctx.calendar.findConflicts(start, end, opts.excludeEventId);
   if (conflicts.length === 0) return null;
   const tz = ctx.client.timezone;
-  let out = renderConflicts(conflicts, tz);
 
+  if (opts.title) {
+    const dup = conflicts.find((c) => normalizeTitle(c.title) === normalizeTitle(opts.title as string));
+    if (dup) {
+      return `ALREADY EXISTS — nothing was ${opts.verb}. "${dup.title}" is already on the calendar at ${formatInTz(dup.start, tz)} → ${formatInTz(dup.end, tz)}. This is almost certainly the SAME meeting (do NOT offer other times as if it were a clash). Tell the client they already have it, and ask whether they want to change that one or genuinely add a separate duplicate (only then retry with allow_conflict=true).`;
+    }
+  }
+
+  let out = renderConflicts(conflicts, tz);
   // SMART SCHEDULING: proactively offer concrete alternatives in the SAME
   // result — the assistant presents them directly instead of having to
   // re-derive with find_free_time. Search around the requested time for the
@@ -75,7 +94,107 @@ async function conflictWarning(
       '\nNearest open times:\n' +
       slots.map((s) => `- ${formatInTz(s.start, tz)} → ${formatInTz(s.end, tz)}`).join('\n');
   }
-  return out;
+  const pickVerb = opts.verb === 'created' ? 'book' : 'move';
+  const timeWord = opts.verb === 'created' ? 'requested' : 'new';
+  return `CONFLICT — nothing was ${opts.verb}. The ${timeWord} time overlaps:\n${out}\nAsk the client whether to pick another time or ${pickVerb} anyway (then retry with allow_conflict=true).`;
+}
+
+/** "60" → "1 hour", "10" → "10 min", "90" → "1h 30m", "1440" → "1 day". */
+function formatLead(min: number): string {
+  if (min % 1440 === 0) {
+    const d = min / 1440;
+    return `${d} day${d > 1 ? 's' : ''}`;
+  }
+  if (min % 60 === 0) {
+    const h = min / 60;
+    return `${h} hour${h > 1 ? 's' : ''}`;
+  }
+  if (min > 60) return `${Math.floor(min / 60)}h ${min % 60}m`;
+  return `${min} min`;
+}
+
+/** [60, 10] → "1 hour and 10 min". */
+function formatLeads(leads: number[]): string {
+  const p = leads.map(formatLead);
+  return p.length <= 1 ? (p[0] ?? '') : `${p.slice(0, -1).join(', ')} and ${p[p.length - 1]}`;
+}
+
+/**
+ * Arm ONE companion reminder per lead (minutes before) for a meeting — so a
+ * client can have several pings (e.g. an hour before AND ten minutes before).
+ * Each companion is an independent Task the reminder cron fires on its own, keyed
+ * on the series master id so they all move/cancel with the event. Recurring
+ * meetings get recurring companions (skipping any already-past first occurrence
+ * via firstFutureOccurrence). Returns a human note listing the pings actually set.
+ */
+type CompanionRecurrence = ReturnType<typeof repeatToFields> | null;
+
+/** A repeat spec → companion recurrence fields, unless it's a pattern our DB
+ * cron can't represent (weekly interval>1 WITH weekdays), where it's one-shot. */
+function companionRecurrenceFrom(repeat: RepeatInput | undefined): CompanionRecurrence {
+  if (!repeat) return null;
+  const unsupported =
+    repeat.freq === 'weekly' && (repeat.interval ?? 1) > 1 && (repeat.weekdays?.length ?? 0) > 0;
+  return unsupported ? null : repeatToFields(repeat);
+}
+
+async function armEventReminders(
+  ctx: ToolContext,
+  event: CalendarEvent,
+  eventStart: Date,
+  leads: number[],
+  companionRec: CompanionRecurrence,
+): Promise<string> {
+  const positive = Array.from(new Set(leads.filter((n) => Number.isInteger(n) && n > 0))).sort(
+    (a, b) => b - a, // earliest ping first
+  );
+  if (positive.length === 0) return '';
+  const seriesId = event.seriesId ?? event.id;
+  const armed: number[] = [];
+  let anyFailed = false;
+  for (const lead of positive) {
+    const firstAnchor = new Date(eventStart.getTime() - lead * 60_000);
+    const reminderAt = companionRec
+      ? firstFutureOccurrence(
+          firstAnchor,
+          companionRec.recurrenceFreq,
+          companionRec.recurrenceInterval,
+          companionRec.recurrenceWeekdays,
+          ctx.client.timezone,
+          ctx.now,
+          companionRec.recurrenceUntil,
+        )
+      : firstAnchor.getTime() > ctx.now.getTime()
+        ? firstAnchor
+        : null; // one-off whose ping is already past — skip just this lead
+    if (!reminderAt) continue;
+    try {
+      await ctx.repo.createTask({
+        title: event.title, // the cron prefixes "⏰ Reminder:" — don't double it
+        type: 'reminder',
+        reminderAt,
+        sourceEventId: seriesId,
+        reminderLeadMinutes: lead,
+        // Pin each companion to the event's zone so pings don't drift vs the
+        // meeting when the client travels across a DST change.
+        ...(companionRec
+          ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: ctx.client.timezone }
+          : {}),
+      });
+      armed.push(lead);
+    } catch {
+      anyFailed = true;
+    }
+  }
+  if (armed.length === 0) {
+    return anyFailed
+      ? " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)"
+      : '';
+  }
+  const eachTime = companionRec ? ' each time' : '';
+  let note = ` I'll remind you ${formatLeads(armed)} before${eachTime}.`;
+  if (anyFailed) note += " (One of the reminders couldn't be set — ask me to add it again.)";
+  return note;
 }
 
 export const findFreeTime = defineTool({
@@ -154,13 +273,11 @@ export const createCalendarEvent = defineTool({
         'Make it a RECURRING meeting ("every Saturday", "every weekday", "monthly") — creates a native repeating Google Calendar event.',
       ),
     reminder_minutes_before: z
-      .number()
-      .int()
-      .min(0)
-      .max(10080)
+      .array(z.number().int().min(0).max(10080))
+      .max(5)
       .optional()
       .describe(
-        "Minutes before the meeting to send a Telegram reminder. Use the client's default lead time unless they specify otherwise; omit or 0 for no reminder.",
+        'Reminder lead times in minutes — the client gets ONE Telegram ping per value ("an hour and ten minutes before" → [60, 10], "just 15 min before" → [15]). OMIT this to use the client\'s DEFAULT reminders (given below) — that is the normal case. Pass [] for NO reminder on this meeting. Only set it when the client specifies reminders for THIS meeting.',
       ),
     allow_conflict: z
       .boolean()
@@ -182,10 +299,11 @@ export const createCalendarEvent = defineTool({
     // Conflict-check only the FIRST occurrence (recurring series can't be fully
     // pre-checked); still catches the common "this slot is taken" case.
     if (!input.allow_conflict) {
-      const conflicts = await conflictWarning(ctx, input.start, end);
-      if (conflicts) {
-        return `CONFLICT — nothing was created. The requested time overlaps:\n${conflicts}\nAsk the client whether to pick another time or book anyway (then retry with allow_conflict=true).`;
-      }
+      const conflicts = await conflictWarning(ctx, input.start, end, {
+        verb: 'created',
+        title: input.title,
+      });
+      if (conflicts) return conflicts;
     }
     const event = await ctx.calendar.createEvent({
       title: input.title,
@@ -200,63 +318,19 @@ export const createCalendarEvent = defineTool({
       timeZone: ctx.client.timezone,
     });
 
-    let reminderNote = '';
-    if (input.reminder_minutes_before && input.reminder_minutes_before > 0) {
-      // A companion reminder in our DB drives the Telegram ping via the same
-      // reliable reminder cron the tasks use (the calendar itself is not
-      // polled). Keyed on the SERIES master id so it moves/cancels with the event.
-      const firstAnchor = new Date(input.start.getTime() - input.reminder_minutes_before * 60_000);
-      // A recurring meeting gets a RECURRING companion (ping before EACH
-      // occurrence) — unless the pattern is one our DB cron can't represent.
-      const rep = input.repeat;
-      const companionRec =
-        rep && !(rep.freq === 'weekly' && (rep.interval ?? 1) > 1 && (rep.weekdays?.length ?? 0) > 0)
-          ? repeatToFields(rep)
-          : null;
-      // For a recurring companion whose FIRST reminder is already past (e.g. the
-      // series' first occurrence is today and the lead has elapsed), arm the next
-      // FUTURE occurrence instead of dropping every future ping.
-      const reminderAt = companionRec
-        ? firstFutureOccurrence(
-            firstAnchor,
-            companionRec.recurrenceFreq,
-            companionRec.recurrenceInterval,
-            companionRec.recurrenceWeekdays,
-            ctx.client.timezone,
-            ctx.now,
-            companionRec.recurrenceUntil,
-          )
-        : firstAnchor.getTime() > ctx.now.getTime()
-          ? firstAnchor
-          : null;
-      if (reminderAt) {
-        try {
-          await ctx.repo.createTask({
-            title: input.title, // the cron prefixes "⏰ Reminder:" — don't double it
-            type: 'reminder',
-            reminderAt,
-            sourceEventId: event.seriesId ?? event.id,
-            reminderLeadMinutes: input.reminder_minutes_before,
-            // Pin the companion to the event's zone so its pings don't drift
-            // relative to the meeting when the client travels across a DST change.
-            ...(companionRec
-              ? { ...companionRec, recurrenceAnchor: firstAnchor, recurrenceTimezone: ctx.client.timezone }
-              : {}),
-          });
-          reminderNote = ` I'll remind you ${input.reminder_minutes_before} min before${companionRec ? ' each time' : ''}.`;
-        } catch {
-          // The event IS on the calendar; only the companion reminder failed.
-          // Degrade honestly rather than reporting total failure (which would
-          // make the client re-book → duplicate event).
-          reminderNote =
-            " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)";
-        }
-      } else {
-        // Non-recurring meeting whose lead time is already past — never claim a
-        // reminder we didn't set.
-        reminderNote = ` (The meeting is under ${input.reminder_minutes_before} min away, so I didn't set a separate reminder.)`;
-      }
-    }
+    // Reminders: the leads the client specified for THIS meeting, else their
+    // configured DEFAULT (code-enforced here so a meeting always gets the
+    // client's reminders — never dependent on the model remembering to ask).
+    // Each lead → an independent companion ping.
+    const leads = input.reminder_minutes_before ?? ctx.client.reminderLeads;
+    const reminderNote = await armEventReminders(
+      ctx,
+      event,
+      input.start,
+      leads,
+      companionRecurrenceFrom(input.repeat),
+    );
+
     let inviteNote = '';
     if (input.attendees && input.attendees.length > 0) {
       inviteNote = input.send_invites
@@ -294,12 +368,12 @@ export const updateCalendarEvent = defineTool({
       .optional()
       .describe('Email attendees about the change. Default false; true ONLY when the client says to invite/notify them.'),
     reminder_minutes_before: z
-      .number()
-      .int()
-      .min(0)
-      .max(10080)
+      .array(z.number().int().min(0).max(10080))
+      .max(5)
       .optional()
-      .describe('Change the Telegram reminder lead (0 to remove it). If omitted, an existing reminder is kept and moves with the event.'),
+      .describe(
+        'Change the meeting\'s reminders to this list of lead times in minutes (one ping each; "an hour and 10 min before" → [60, 10]). Pass [] to remove all reminders. If OMITTED, existing reminders are kept and moved with the event. Only set when the client changes the reminders.',
+      ),
     allow_conflict: z.boolean().optional(),
   }),
   async execute(input, ctx) {
@@ -332,10 +406,11 @@ export const updateCalendarEvent = defineTool({
     if (timeChanging && effStart && effEnd && !allow_conflict) {
       // Exclude the event's OWN occurrence (the instance id we're editing) so it
       // doesn't flag itself as a clash.
-      const conflicts = await conflictWarning(ctx, effStart, effEnd, event_id);
-      if (conflicts) {
-        return `CONFLICT — nothing was changed. The new time overlaps:\n${conflicts}\nAsk the client whether to pick another time or move anyway (then retry with allow_conflict=true).`;
-      }
+      const conflicts = await conflictWarning(ctx, effStart, effEnd, {
+        verb: 'changed',
+        excludeEventId: event_id,
+      });
+      if (conflicts) return conflicts;
     }
 
     // What start/end to write. For a SERIES time change, apply the new
@@ -366,62 +441,40 @@ export const updateCalendarEvent = defineTool({
       ...(send_invites !== undefined ? { sendInvites: send_invites } : {}),
     });
 
-    // Keep the companion reminder correct, keyed on the SERIES master id.
+    // Keep companion reminders correct, keyed on the SERIES master id. A meeting
+    // can have SEVERAL (e.g. 1h + 10m before).
     const seriesId = event.seriesId ?? targetId;
     let reminderNote = '';
-    let desiredLead: number | null | undefined;
-    // Read the existing companion up front so a move can PRESERVE its recurrence.
-    const existingReminder = await ctx.repo.getEventReminder(seriesId);
-    if (reminder_minutes_before !== undefined) desiredLead = reminder_minutes_before;
-    else if (start !== undefined) desiredLead = existingReminder?.reminderLeadMinutes ?? undefined;
-    if (desiredLead !== undefined) {
+    // Read existing companions up front so a move can PRESERVE all their leads +
+    // recurrence.
+    const existing = await ctx.repo.getEventReminders(seriesId);
+    // Desired leads: an explicit new list wins; otherwise, if the time changed,
+    // preserve the existing leads (moved with the event). If neither, leave
+    // reminders untouched.
+    let desiredLeads: number[] | undefined;
+    if (reminder_minutes_before !== undefined) desiredLeads = reminder_minutes_before;
+    else if (timeChanging)
+      desiredLeads = existing
+        .map((e) => e.reminderLeadMinutes)
+        .filter((n): n is number => n != null);
+    if (desiredLeads !== undefined) {
       try {
         await ctx.repo.deleteEventReminders(seriesId);
-        if (desiredLead && desiredLead > 0) {
-          const firstAnchor = new Date(event.start.getTime() - desiredLead * 60_000);
-          const recFreq = existingReminder?.recurrenceFreq;
-          // Preserve recurrence so a recurring meeting keeps pinging before EVERY
-          // occurrence. For a series whose master (DTSTART) is in the PAST — the
-          // common case when adding a reminder to an established standup — arm the
-          // next FUTURE occurrence rather than dropping the whole reminder series.
-          const remAt = recFreq
-            ? firstFutureOccurrence(
-                firstAnchor,
-                recFreq,
-                existingReminder.recurrenceInterval ?? 1,
-                existingReminder.recurrenceWeekdays,
-                ctx.client.timezone,
-                ctx.now,
-                existingReminder.recurrenceUntil,
-              )
-            : firstAnchor.getTime() > ctx.now.getTime()
-              ? firstAnchor
-              : null;
-          if (remAt) {
-            const rec = recFreq
-              ? {
-                  recurrenceFreq: recFreq,
-                  recurrenceInterval: existingReminder.recurrenceInterval ?? 1,
-                  recurrenceWeekdays: existingReminder.recurrenceWeekdays,
-                  recurrenceUntil: existingReminder.recurrenceUntil,
-                  recurrenceAnchor: firstAnchor,
-                  recurrenceTimezone: ctx.client.timezone,
-                }
-              : {};
-            await ctx.repo.createTask({
-              title: event.title,
-              type: 'reminder',
-              reminderAt: remAt,
-              sourceEventId: seriesId,
-              reminderLeadMinutes: desiredLead,
-              ...rec,
-            });
-            reminderNote = ` Reminder set ${desiredLead} min before${recFreq ? ' each time' : ''}.`;
-          } else if (event.start.getTime() > ctx.now.getTime()) {
-            reminderNote = ` (Heads up: ${desiredLead} min before is already past, so I didn't set a separate reminder for it.)`;
-          }
-        } else if (reminder_minutes_before === 0) {
-          reminderNote = ' Reminder removed.';
+        // Preserve the series' recurrence (all companions share the event's).
+        const src = existing.find((e) => e.recurrenceFreq);
+        const companionRec: CompanionRecurrence = src?.recurrenceFreq
+          ? {
+              recurrenceFreq: src.recurrenceFreq,
+              recurrenceInterval: src.recurrenceInterval ?? 1,
+              recurrenceWeekdays: src.recurrenceWeekdays,
+              recurrenceUntil: src.recurrenceUntil,
+            }
+          : null;
+        const positive = desiredLeads.filter((n) => n > 0);
+        if (positive.length > 0) {
+          reminderNote = await armEventReminders(ctx, event, event.start, positive, companionRec);
+        } else if (reminder_minutes_before !== undefined) {
+          reminderNote = ' Reminders removed.';
         }
       } catch {
         // Google move landed; only the companion DB work failed — degrade honestly.

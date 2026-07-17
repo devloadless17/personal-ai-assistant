@@ -31,6 +31,7 @@ const CLIENT: Client = {
   telegramBindCode: null,
   defaultReminderMinutes: 15,
   defaultMeetingMinutes: 60,
+  reminderLeads: [15],
   dailyBriefHour: 7,
   lastBriefDate: null,
   lastBriefAt: null,

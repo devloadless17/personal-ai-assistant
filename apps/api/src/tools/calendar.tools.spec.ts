@@ -14,6 +14,7 @@ const CLIENT = {
   name: 'T',
   assistantName: 'A',
   defaultMeetingMinutes: 90,
+  reminderLeads: [] as number[],
 } as Client;
 
 function makeGateway(
@@ -78,6 +79,7 @@ function ctxWith(gateway?: CalendarGateway): ToolContext {
     deleteEventReminders: jest.fn().mockResolvedValue(undefined),
     getEventReminderLead: jest.fn().mockResolvedValue(null),
     getEventReminder: jest.fn().mockResolvedValue(null),
+    getEventReminders: jest.fn().mockResolvedValue([]),
   } as unknown as ClientScopedRepository;
   return {
     repo,
@@ -153,7 +155,7 @@ describe('calendar tools — conflict gating & honesty', () => {
         start: new Date('2026-07-16T09:05:00Z'), // first reminder 08:50 = past
         end: new Date('2026-07-16T09:20:00Z'),
         repeat: { freq: 'daily' },
-        reminder_minutes_before: 15,
+        reminder_minutes_before: [15],
       },
       ctx,
     );
@@ -163,6 +165,97 @@ describe('calendar tools — conflict gating & honesty', () => {
     expect(created[0]?.recurrenceFreq).toBe('DAILY');
     expect(created[0]?.recurrenceTimezone).toBe('UTC');
     expect(res).toContain('each time');
+  });
+
+  // Capturing ctx: records every companion reminder createTask receives.
+  function capturingCtx(
+    clientOver: Partial<Client>,
+    gw: CalendarGateway,
+  ): { ctx: ToolContext; created: Record<string, unknown>[] } {
+    const created: Record<string, unknown>[] = [];
+    const ctx = {
+      repo: {
+        createTask: jest.fn((d: Record<string, unknown>) => {
+          created.push(d);
+          return Promise.resolve({});
+        }),
+        deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+        getEventReminders: jest.fn().mockResolvedValue([]),
+      } as unknown as ClientScopedRepository,
+      client: { ...CLIENT, ...clientOver },
+      now: new Date('2026-07-16T09:00:00Z'),
+      calendar: gw,
+    } as ToolContext;
+    return { ctx, created };
+  }
+
+  it('applies the client DEFAULT reminders to a meeting (one ping per lead), code-enforced', async () => {
+    const gw = makeGateway([]);
+    const { ctx, created } = capturingCtx({ reminderLeads: [60, 10] }, gw);
+    const res = await createCalendarEvent.execute(
+      { title: 'Sync', start: new Date('2026-07-16T15:00:00Z'), end: new Date('2026-07-16T16:00:00Z') },
+      ctx, // note: reminder_minutes_before OMITTED — must still apply the default
+    );
+    expect(created).toHaveLength(2);
+    expect(created.find((c) => c.reminderLeadMinutes === 60)?.reminderAt).toEqual(
+      new Date('2026-07-16T14:00:00Z'),
+    );
+    expect(created.find((c) => c.reminderLeadMinutes === 10)?.reminderAt).toEqual(
+      new Date('2026-07-16T14:50:00Z'),
+    );
+    expect(res).toContain('1 hour and 10 min before');
+  });
+
+  it('a per-meeting reminder list overrides the default', async () => {
+    const gw = makeGateway([]);
+    const { ctx, created } = capturingCtx({ reminderLeads: [60, 10] }, gw);
+    await createCalendarEvent.execute(
+      {
+        title: 'Sync',
+        start: new Date('2026-07-16T15:00:00Z'),
+        end: new Date('2026-07-16T16:00:00Z'),
+        reminder_minutes_before: [30],
+      },
+      ctx,
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]?.reminderLeadMinutes).toBe(30);
+  });
+
+  it('reminder_minutes_before [] turns reminders off for this meeting', async () => {
+    const gw = makeGateway([]);
+    const { ctx, created } = capturingCtx({ reminderLeads: [60, 10] }, gw);
+    await createCalendarEvent.execute(
+      {
+        title: 'Sync',
+        start: new Date('2026-07-16T15:00:00Z'),
+        end: new Date('2026-07-16T16:00:00Z'),
+        reminder_minutes_before: [],
+      },
+      ctx,
+    );
+    expect(created).toHaveLength(0);
+  });
+
+  it('recognizes a same-title clash as an EXISTING duplicate, not a scheduling conflict', async () => {
+    const existing: CalendarEvent = {
+      id: 'e1',
+      title: 'Meeting with Ali',
+      start: new Date('2026-07-17T21:00:00Z'),
+      end: new Date('2026-07-17T22:00:00Z'),
+      allDay: false,
+    };
+    const gw = makeGateway([existing], [
+      { start: new Date('2026-07-17T22:00:00Z'), end: new Date('2026-07-17T23:00:00Z') },
+    ]);
+    const res = await createCalendarEvent.execute(
+      // Same title (different case/spacing), same time → duplicate, not a clash.
+      { title: 'meeting with  ali', start: new Date('2026-07-17T21:00:00Z'), end: new Date('2026-07-17T22:00:00Z') },
+      ctxWith(gw),
+    );
+    expect(res).toContain('ALREADY EXISTS');
+    expect(res).not.toContain('Nearest open times'); // don't offer slots for a dupe
+    expect(gw.created).toHaveLength(0);
   });
 
   it('applies the client default meeting length when no end is given', async () => {
@@ -349,7 +442,7 @@ describe('calendar tools — conflict gating & honesty', () => {
         start: new Date('2026-07-18T12:00:00Z'),
         end: new Date('2026-07-18T13:00:00Z'),
         repeat: { freq: 'weekly', weekdays: [6] },
-        reminder_minutes_before: 15,
+        reminder_minutes_before: [15],
       },
       ctx,
     );

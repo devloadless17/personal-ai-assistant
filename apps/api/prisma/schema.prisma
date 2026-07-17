@@ -100,10 +100,16 @@ model Client {
   googleNeedsReauth Boolean @default(false)
 
   // ── Reminder preferences ───────────────────────────────────────────────────
-  /// Default lead time (minutes before a task's due time) to send a reminder.
-  /// The client can change this ("always remind me 30 minutes before") and can
-  /// override it per task in chat. 0 = don't add reminders automatically.
+  /// DEPRECATED (superseded by reminderLeads). Kept for back-compat; not read.
   defaultReminderMinutes Int @default(15)
+
+  /// Default reminder lead times (minutes before a meeting/event) — the client
+  /// gets ONE Telegram ping per value. e.g. [60, 10] = an hour before AND ten
+  /// minutes before. The client customizes this ("just remind me 10 min before"
+  /// → [10]; "an hour and 5 min before" → [60, 5]) and can override per event.
+  /// Empty [] = no automatic reminders. Applied server-side so it never depends
+  /// on the model remembering.
+  reminderLeads Int[] @default([60, 10])
 
   /// Default meeting/event length in minutes when the client names only a start
   /// ("book a call at 3pm"). The client can change it ("my meetings are 2 hours")
