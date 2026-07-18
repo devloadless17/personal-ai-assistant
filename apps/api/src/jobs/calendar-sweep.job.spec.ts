@@ -62,6 +62,7 @@ function makeJob(
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   const getEventMock = jest.fn(getEvent);
   const gateway = { getEvent: getEventMock } as unknown as GoogleCalendarGateway;
@@ -203,6 +204,7 @@ function makeArmJob(opts: {
   } as unknown as PrismaService;
   const job = new CalendarSweepJob(
     prisma,
+    {} as never,
     {} as never,
     {} as never,
     {} as never,

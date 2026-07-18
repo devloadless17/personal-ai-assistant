@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenancyService } from '../tenancy/tenancy.service';
 import { endOfTodayInTz, formatInTz, startOfTodayInTz } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
+import { ClientNotifierService } from './client-notifier.service';
 
 /** How many clients to build+send briefs for in parallel. */
 const BRIEF_CONCURRENCY = 6;
@@ -66,6 +67,7 @@ export class DailyBriefJob implements OnApplicationBootstrap {
     private readonly crypto: CryptoService,
     private readonly google: GoogleOAuthService,
     private readonly alerts: AdminAlertService,
+    private readonly notifier: ClientNotifierService,
   ) {}
 
   /** After any restart/redeploy, check briefs immediately — so a deploy landing
@@ -166,6 +168,8 @@ export class DailyBriefJob implements OnApplicationBootstrap {
         throw new Error('client has no bot token or bound chat');
       }
       await this.telegram.sendMessage(botToken, client.telegramChatId, text);
+      // Recorded only after a confirmed send, so the admin log mirrors reality.
+      await this.notifier.record(client.id, text, 'brief');
       this.lastSentCount += 1;
       this.logger.log(`Daily brief sent to client ${client.id} (${localDate})`);
     } catch (err) {

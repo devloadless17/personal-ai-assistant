@@ -41,6 +41,21 @@ enum MessageDirection {
   outbound
 }
 
+/// What produced a message — so an admin can see EXACTLY what the client
+/// receives, not just the chat back-and-forth. Everything the system pushes
+/// (reminder pings, the daily brief, conflict/timezone notices) is recorded too,
+/// and `kind` tells them apart in the admin log.
+enum MessageKind {
+  /// Client message, or the assistant's conversational reply.
+  chat
+  /// A scheduled reminder ping ("⏰ Reminder: …").
+  reminder
+  /// The daily summary.
+  brief
+  /// System notice: double-booking warning, timezone-change heads-up, etc.
+  alert
+}
+
 model Client {
   id        String       @id @default(cuid())
   name      String
@@ -268,6 +283,9 @@ model Message {
   client   Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   direction MessageDirection
+  /// Existing rows predate system-message logging and are all conversational,
+  /// so `chat` is the correct backfill default.
+  kind      MessageKind      @default(chat)
   content   String
 
   /// Telegram update_id — dedup key: Telegram redelivers webhooks on timeout,
@@ -279,6 +297,8 @@ model Message {
   // Context assembly: last N by (clientId, createdAt DESC) LIMIT N;
   // id as tiebreaker so same-millisecond bursts paginate correctly
   @@index([clientId, createdAt, id])
+  // Admin log filtering by source ("show only reminders"), newest first.
+  @@index([clientId, kind, createdAt])
   @@unique([clientId, telegramUpdateId])
 }
 

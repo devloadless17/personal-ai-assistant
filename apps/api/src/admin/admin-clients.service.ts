@@ -236,6 +236,7 @@ export class AdminClientsService {
       items: page.map((r) => ({
         id: r.id,
         direction: r.direction,
+        kind: r.kind,
         content: r.content,
         createdAt: r.createdAt.toISOString(),
       })),

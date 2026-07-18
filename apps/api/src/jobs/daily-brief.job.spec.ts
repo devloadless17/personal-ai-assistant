@@ -1,6 +1,7 @@
 import type { Client } from '@prisma/client';
 import { DailyBriefJob } from './daily-brief.job';
 import type { AdminAlertService } from './admin-alert.service';
+import type { ClientNotifierService } from './client-notifier.service';
 import type { CryptoService } from '../crypto/crypto.service';
 import type { GoogleOAuthService } from '../integrations/google/google-oauth.service';
 import type { TelegramService } from '../integrations/telegram/telegram.service';
@@ -57,7 +58,7 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
     const google = { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService;
     const alerts = { alert: jest.fn().mockResolvedValue(undefined) } as unknown as AdminAlertService;
 
-    const job = new DailyBriefJob(prisma, tenancy, telegram, crypto, google, alerts);
+    const job = new DailyBriefJob(prisma, tenancy, telegram, crypto, google, alerts, { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService);
     // 09:00 UTC = 12:00 Beirut — well past the 08:00 brief hour.
     await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
 
@@ -82,6 +83,7 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
       { decrypt: () => 't' } as unknown as CryptoService,
       { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService,
       { alert: jest.fn() } as unknown as AdminAlertService,
+      { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
     );
     await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
     expect(sendMessage).not.toHaveBeenCalled();
@@ -105,6 +107,7 @@ describe('DailyBriefJob — lastBriefAt guard (traveler date-shift)', () => {
       { decrypt: () => 'bot-token' } as unknown as CryptoService,
       { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService,
       { alert: jest.fn().mockResolvedValue(undefined) } as unknown as AdminAlertService,
+      { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
     );
     return { job, sendMessage };
   }

@@ -116,10 +116,17 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
-/** A single message in a client's assistant conversation (admin view). */
+/** What produced a message — lets the admin log distinguish the chat
+ * back-and-forth from everything the system pushes on its own. */
+export type MessageKind = "chat" | "reminder" | "brief" | "alert";
+
+/** A single message in a client's assistant conversation (admin view).
+ * Includes system-sent messages (reminders, daily brief, alerts), so the log
+ * shows EVERYTHING the client received — not just the conversation. */
 export interface ConversationMessage {
   id: string;
   direction: "inbound" | "outbound";
+  kind: MessageKind;
   content: string;
   createdAt: string;
 }

@@ -7,6 +7,7 @@ import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { formatEventWhen, nextOccurrence } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
+import { ClientNotifierService } from './client-notifier.service';
 
 /**
  * Every minute: deliver due, unsent task reminders to each client's Telegram.
@@ -35,6 +36,7 @@ export class ReminderJob implements OnApplicationBootstrap {
     private readonly telegram: TelegramService,
     private readonly crypto: CryptoService,
     private readonly alerts: AdminAlertService,
+    private readonly notifier: ClientNotifierService,
   ) {}
 
   /** Catch up on any overdue reminders immediately on boot (e.g. after a
@@ -162,11 +164,11 @@ export class ReminderJob implements OnApplicationBootstrap {
         // fires AT its own time, dueAt == reminderAt → no redundant "(due …)".)
         suffix = ` (due ${formatEventWhen(task.dueAt, now, tz)})`;
       }
-      await this.telegram.sendMessage(
-        botToken,
-        client.telegramChatId,
-        `⏰ Reminder: ${subject}${suffix}`,
-      );
+      const text = `⏰ Reminder: ${subject}${suffix}`;
+      await this.telegram.sendMessage(botToken, client.telegramChatId, text);
+      // Record AFTER a confirmed send so the admin log shows exactly what the
+      // client received (never a phantom row for a failed send).
+      await this.notifier.record(client.id, text, 'reminder');
       // Delivery CONFIRMED — recurring reminders roll forward to their next
       // occurrence; one-shots are marked permanently sent.
       await this.advanceOrComplete(task, client.timezone, now);

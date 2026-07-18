@@ -12,6 +12,7 @@ import { TimezoneService } from '../timezone/timezone.service';
 import type { CalendarEvent } from '../tools/tool.types';
 import { formatInTz } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
+import { ClientNotifierService } from './client-notifier.service';
 
 /** Look-ahead window for double-booking detection. */
 const HORIZON_MS = 48 * 60 * 60_000;
@@ -59,6 +60,7 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
     private readonly telegram: TelegramService,
     private readonly alerts: AdminAlertService,
     private readonly timezone: TimezoneService,
+    private readonly notifier: ClientNotifierService,
   ) {}
 
   /** Run once on boot so double-bookings are surfaced right after a deploy and
@@ -132,11 +134,9 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
           ? this.crypto.decrypt(client.telegramBotTokenEnc)
           : null;
         if (botToken && client.telegramChatId) {
-          await this.telegram.sendMessage(
-            botToken,
-            client.telegramChatId,
-            `🌍 Looks like you're on ${tz.to} time now — I've switched your daily brief, reminders and new scheduling to match. Already-booked events keep their original time. Reply "keep home time" to stay on your home zone instead.`,
-          );
+          const notice = `🌍 Looks like you're on ${tz.to} time now — I've switched your daily brief, reminders and new scheduling to match. Already-booked events keep their original time. Reply "keep home time" to stay on your home zone instead.`;
+          await this.telegram.sendMessage(botToken, client.telegramChatId, notice);
+          await this.notifier.record(client.id, notice, 'alert');
         }
       }
 
@@ -197,6 +197,7 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
         // duplicate on the tiny send-ok/write-fail window beats a lost alert —
         // the same durability rule the reminder lease uses.
         await this.telegram.sendMessage(botToken, client.telegramChatId, msg);
+        await this.notifier.record(client.id, msg, 'alert');
         try {
           await this.prisma.calendarConflictAlert.create({
             data: { clientId: client.id, conflictKey },

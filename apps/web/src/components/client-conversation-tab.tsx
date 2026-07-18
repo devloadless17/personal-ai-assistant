@@ -1,9 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { ConversationMessage, Paginated } from "@assistant/shared";
+import type { ConversationMessage, MessageKind, Paginated } from "@assistant/shared";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+
+/** How each outbound message is labelled in the log. Everything the system
+ * sends the client is recorded, so an admin can audit exactly what was
+ * delivered — not just the chat back-and-forth. */
+const KIND_LABEL: Record<MessageKind, string> = {
+  chat: "Assistant",
+  reminder: "⏰ Reminder (auto)",
+  brief: "📅 Daily brief (auto)",
+  alert: "⚠️ System alert (auto)",
+};
 
 /** Super-admin read-only view of a client's assistant conversation, rendered as
  * chat bubbles (oldest → newest). Used to see how clients talk to the assistant
@@ -66,22 +76,29 @@ export function ConversationTab({ clientId }: { clientId: string }) {
           <div className="space-y-2">
             {messages.map((m) => {
               const inbound = m.direction === "inbound";
+              // System-sent messages (reminder pings, the daily brief, alerts)
+              // are NOT chat replies — style them distinctly so it's obvious at a
+              // glance what the assistant said vs what the system pushed on its own.
+              const system = !inbound && m.kind !== "chat";
               return (
                 <div key={m.id} className={`flex ${inbound ? "justify-start" : "justify-end"}`}>
                   <div
                     className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
                       inbound
                         ? "rounded-tl-sm bg-muted"
-                        : "rounded-tr-sm bg-primary text-primary-foreground"
+                        : system
+                          ? "rounded-tr-sm border border-dashed bg-muted/60"
+                          : "rounded-tr-sm bg-primary text-primary-foreground"
                     }`}
                   >
                     <p className="whitespace-pre-wrap break-words">{m.content}</p>
                     <p
                       className={`mt-1 text-[10px] ${
-                        inbound ? "text-muted-foreground" : "text-primary-foreground/70"
+                        inbound || system ? "text-muted-foreground" : "text-primary-foreground/70"
                       }`}
                     >
-                      {inbound ? "Client" : "Assistant"} · {new Date(m.createdAt).toLocaleString()}
+                      {inbound ? "Client" : KIND_LABEL[m.kind]} ·{" "}
+                      {new Date(m.createdAt).toLocaleString()}
                     </p>
                   </div>
                 </div>

@@ -3,6 +3,7 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { TelegramService } from '../integrations/telegram/telegram.service';
 import type { CryptoService } from '../crypto/crypto.service';
 import type { AdminAlertService } from './admin-alert.service';
+import type { ClientNotifierService } from './client-notifier.service';
 
 const CLIENT = {
   id: 'c1',
@@ -73,7 +74,7 @@ function makeJob(opts?: {
     }),
   } as unknown as AdminAlertService;
 
-  return { job: new ReminderJob(prisma, telegram, crypto, alertsSvc), sent, updates, alerts };
+  return { job: new ReminderJob(prisma, telegram, crypto, alertsSvc, { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService), sent, updates, alerts };
 }
 
 describe('ReminderJob — at-least-once lease/send/confirm', () => {

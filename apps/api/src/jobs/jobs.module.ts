@@ -5,6 +5,7 @@ import { TelegramModule } from '../integrations/telegram/telegram.module';
 import { TimezoneModule } from '../timezone/timezone.module';
 import { AdminAlertService } from './admin-alert.service';
 import { CalendarSweepJob } from './calendar-sweep.job';
+import { ClientNotifierService } from './client-notifier.service';
 import { DailyBriefJob } from './daily-brief.job';
 import { JobsDiagnosticsService } from './jobs-diagnostics.service';
 import { ReminderJob } from './reminder.job';
@@ -13,6 +14,7 @@ import { ReminderJob } from './reminder.job';
   imports: [ScheduleModule.forRoot(), TelegramModule, GoogleModule, TimezoneModule],
   providers: [
     AdminAlertService,
+    ClientNotifierService,
     ReminderJob,
     DailyBriefJob,
     CalendarSweepJob,
