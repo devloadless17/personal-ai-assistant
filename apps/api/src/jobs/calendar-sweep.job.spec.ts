@@ -151,6 +151,15 @@ describe('CalendarSweepJob — companion reminder reconciliation', () => {
     expect(deletes).toEqual([]); // the safety guarantee
   });
 
+  it('does NOT re-time a recurring companion even when the event start differs', async () => {
+    const { reconcile, updates } = makeJob(
+      [oneOff({ recurrenceFreq: 'WEEKLY', title: 'Standup' })],
+      () => Promise.resolve(ev({ title: 'Standup', start: new Date('2026-07-17T09:00:00Z') })),
+    );
+    await reconcile();
+    expect(updates).toEqual([]); // title matches, and time must be left alone
+  });
+
   it('fetches each shared event only once (two companions, one meeting)', async () => {
     const { reconcile, getEventMock } = makeJob(
       [
@@ -161,5 +170,105 @@ describe('CalendarSweepJob — companion reminder reconciliation', () => {
     );
     await reconcile();
     expect(getEventMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Auto-arming: a meeting the client created DIRECTLY in the Google Calendar app
+ * must get the same reminders as one booked through the bot — without ever
+ * double-arming a bot-booked meeting or resurrecting reminders the client
+ * explicitly turned off.
+ */
+function makeArmJob(opts: {
+  events: CalendarEvent[];
+  existing?: { sourceEventId: string }[];
+  optOuts?: { eventId: string }[];
+  reminderLeads?: number[];
+}): {
+  arm: () => Promise<void>;
+  created: Record<string, unknown>[];
+} {
+  const created: Record<string, unknown>[] = [];
+  const prisma = {
+    task: {
+      findMany: jest.fn().mockResolvedValue(opts.existing ?? []),
+      create: jest.fn((args: { data: Record<string, unknown> }) => {
+        created.push(args.data);
+        return Promise.resolve({});
+      }),
+    },
+    eventReminderOptOut: {
+      findMany: jest.fn().mockResolvedValue(opts.optOuts ?? []),
+    },
+  } as unknown as PrismaService;
+  const job = new CalendarSweepJob(
+    prisma,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  const gateway = {
+    listEvents: jest.fn().mockResolvedValue(opts.events),
+  } as unknown as GoogleCalendarGateway;
+  const client = { ...CLIENT, reminderLeads: opts.reminderLeads ?? [60, 10] };
+  const arm = (): Promise<void> =>
+    (job as unknown as {
+      armMissingCompanions(c: Client, g: GoogleCalendarGateway, now: Date): Promise<void>;
+    }).armMissingCompanions(client, gateway, NOW);
+  return { arm, created };
+}
+
+describe('CalendarSweepJob — auto-arming Google-created meetings', () => {
+  it('arms one reminder per lead for a meeting added in the Google app', async () => {
+    const { arm, created } = makeArmJob({ events: [ev({ id: 'g1' })] });
+    await arm();
+    expect(created).toHaveLength(2); // [60, 10]
+    expect(created.map((c) => c.reminderLeadMinutes).sort()).toEqual([10, 60]);
+    // Keyed on the OCCURRENCE id so reconciliation re-times from the right event.
+    expect(created.every((c) => c.sourceEventId === 'g1')).toBe(true);
+    expect((created[0] as { reminderAt: Date }).reminderAt.toISOString()).toBe(
+      '2026-07-17T19:00:00.000Z', // 60 min before 20:00
+    );
+  });
+
+  it('does NOT double-arm a meeting the bot already booked (companion under series id)', async () => {
+    const { arm, created } = makeArmJob({
+      events: [ev({ id: 'occ-1', seriesId: 'master-1' })],
+      existing: [{ sourceEventId: 'master-1' }],
+    });
+    await arm();
+    expect(created).toEqual([]);
+  });
+
+  it('respects an explicit "no reminders for this meeting" opt-out', async () => {
+    const { arm, created } = makeArmJob({
+      events: [ev({ id: 'g2' })],
+      optOuts: [{ eventId: 'g2' }],
+    });
+    await arm();
+    expect(created).toEqual([]);
+  });
+
+  it('skips all-day events (a "1 hour before" ping is meaningless)', async () => {
+    const { arm, created } = makeArmJob({ events: [ev({ id: 'g3', allDay: true })] });
+    await arm();
+    expect(created).toEqual([]);
+  });
+
+  it('arms nothing when the client wants no automatic reminders', async () => {
+    const { arm, created } = makeArmJob({ events: [ev({ id: 'g4' })], reminderLeads: [] });
+    await arm();
+    expect(created).toEqual([]);
+  });
+
+  it('skips leads whose ping time has already passed', async () => {
+    // Meeting in 20 minutes: the 60-min ping is in the past, the 10-min is not.
+    const soon = ev({ id: 'g5', start: new Date(NOW.getTime() + 20 * 60_000) });
+    const { arm, created } = makeArmJob({ events: [soon] });
+    await arm();
+    expect(created).toHaveLength(1);
+    expect(created[0]?.reminderLeadMinutes).toBe(10);
   });
 });

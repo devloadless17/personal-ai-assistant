@@ -104,6 +104,29 @@ export class ClientScopedRepository {
   }
 
   /**
+   * Record/clear "this meeting should have NO reminders".
+   *
+   * The calendar sweep auto-arms reminders for meetings the client added
+   * directly in the Google Calendar app. Without this marker it couldn't tell
+   * "never had reminders" from "the client just turned them off", and would
+   * silently re-add pings they cancelled. Set when reminders are explicitly
+   * emptied; cleared the moment reminders are set again.
+   */
+  async setEventReminderOptOut(eventId: string, optedOut: boolean): Promise<void> {
+    if (optedOut) {
+      await this.prisma.eventReminderOptOut.upsert({
+        where: { clientId_eventId: { clientId: this.clientId, eventId } },
+        create: { clientId: this.clientId, eventId },
+        update: {},
+      });
+    } else {
+      await this.prisma.eventReminderOptOut.deleteMany({
+        where: { clientId: this.clientId, eventId },
+      });
+    }
+  }
+
+  /**
    * Rename an event's companion reminder(s) so the Telegram ping shows the
    * meeting's CURRENT title. Needed when a meeting is renamed without changing
    * its time or reminders (which would otherwise leave the companions — and thus

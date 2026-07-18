@@ -130,11 +130,12 @@ model Client {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tasks          Task[]
-  memories       Memory[]
-  messages       Message[]
-  auditLogs      AuditLog[]
-  conflictAlerts CalendarConflictAlert[]
+  tasks           Task[]
+  memories        Memory[]
+  messages        Message[]
+  auditLogs       AuditLog[]
+  conflictAlerts  CalendarConflictAlert[]
+  reminderOptOuts EventReminderOptOut[]
 
   @@index([status])
   // Admin client list: ORDER BY createdAt DESC
@@ -240,6 +241,25 @@ model CalendarConflictAlert {
   @@index([clientId, alertedAt])
   // Supports the global TTL cleanup (deleteMany where alertedAt < cutoff)
   @@index([alertedAt])
+}
+
+/// "This meeting should have NO reminders" — recorded when the client explicitly
+/// turns reminders off for one event ("no reminder for this one").
+///
+/// The calendar sweep auto-arms reminders for meetings the client added directly
+/// in the Google Calendar app, so it needs a way to tell "never had reminders"
+/// from "the client deliberately removed them" — without this, the sweep would
+/// silently re-add pings the client just asked us to stop. Keyed by the series
+/// master id (or the event id for a one-off), matching Task.sourceEventId.
+model EventReminderOptOut {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  eventId   String
+  createdAt DateTime @default(now())
+
+  @@unique([clientId, eventId])
+  @@index([clientId])
 }
 
 model Message {

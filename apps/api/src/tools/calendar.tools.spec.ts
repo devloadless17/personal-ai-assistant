@@ -78,6 +78,7 @@ function ctxWith(gateway?: CalendarGateway): ToolContext {
     createTask: jest.fn().mockResolvedValue({}),
     deleteEventReminders: jest.fn().mockResolvedValue(undefined),
     renameEventReminders: jest.fn().mockResolvedValue(undefined),
+    setEventReminderOptOut: jest.fn().mockResolvedValue(undefined),
     getEventReminderLead: jest.fn().mockResolvedValue(null),
     getEventReminder: jest.fn().mockResolvedValue(null),
     getEventReminders: jest.fn().mockResolvedValue([]),
@@ -181,6 +182,7 @@ describe('calendar tools — conflict gating & honesty', () => {
           return Promise.resolve({});
         }),
         deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+        setEventReminderOptOut: jest.fn().mockResolvedValue(undefined),
         getEventReminders: jest.fn().mockResolvedValue([]),
       } as unknown as ClientScopedRepository,
       client: { ...CLIENT, ...clientOver },

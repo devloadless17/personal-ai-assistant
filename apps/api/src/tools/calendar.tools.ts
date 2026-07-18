@@ -338,6 +338,13 @@ export const createCalendarEvent = defineTool({
     // client's reminders — never dependent on the model remembering to ask).
     // Each lead → an independent companion ping.
     const leads = input.reminder_minutes_before ?? ctx.client.reminderLeads;
+    // Remember an explicit "no reminders for this meeting" so the calendar
+    // sweep's auto-arming never silently re-adds pings the client refused.
+    if (input.reminder_minutes_before?.length === 0) {
+      await ctx.repo
+        .setEventReminderOptOut(event.seriesId ?? event.id, true)
+        .catch(() => undefined);
+    }
     const companionRec = companionRecurrenceFrom(input.repeat);
     const reminderNote = await armEventReminders(
       ctx,
@@ -482,6 +489,13 @@ export const updateCalendarEvent = defineTool({
       desiredLeads = existing
         .map((e) => e.reminderLeadMinutes)
         .filter((n): n is number => n != null);
+    // An explicit reminder decision on THIS meeting is remembered, so the sweep's
+    // auto-arming respects it: [] opts the event out; any real list opts back in.
+    if (reminder_minutes_before !== undefined) {
+      await ctx.repo
+        .setEventReminderOptOut(seriesId, reminder_minutes_before.length === 0)
+        .catch(() => undefined);
+    }
     if (touchCompanions && desiredLeads !== undefined) {
       try {
         await ctx.repo.deleteEventReminders(seriesId);

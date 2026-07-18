@@ -156,6 +156,17 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
         );
       }
 
+      // Give meetings the client added DIRECTLY in the Google Calendar app the
+      // same reminders as ones booked through the bot. Isolated so a failure
+      // never suppresses the conflict alerts below.
+      try {
+        await this.armMissingCompanions(client, gateway, now);
+      } catch (err) {
+        this.logger.error(
+          `Reminder auto-arm failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       const pairs = await gateway.findOverlappingPairs(now, new Date(now.getTime() + HORIZON_MS));
       if (pairs.length === 0) return;
 
@@ -291,6 +302,100 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
         });
         this.logger.log(`Reconciled reminder ${c.id} to live event ${eventId} (client ${client.id})`);
       }
+    }
+  }
+
+  /** Cap on meetings auto-armed per client per sweep — a safety valve against a
+   * bulk calendar import suddenly generating hundreds of pings. */
+  private static readonly ARM_CAP = 40;
+
+  /**
+   * Give meetings the client created DIRECTLY in the Google Calendar app the
+   * same reminders as ones booked through the bot — so "remind me before my
+   * meetings" holds however the meeting got there.
+   *
+   * A meeting is armed only when ALL of these hold:
+   *  - the client has default reminder leads (empty list = wants none, ever)
+   *  - it isn't an all-day event (a "1 hour before" ping is meaningless there)
+   *  - it has no UNSENT companion already, under EITHER its occurrence id or its
+   *    series id (so bot-booked meetings are never double-armed)
+   *  - the client hasn't explicitly turned reminders off for it (opt-out marker)
+   *  - the resulting ping is still in the future
+   *
+   * Companions are keyed on the OCCURRENCE id, not the series master. That
+   * matters: reconcileCompanions re-times a one-off companion from
+   * getEvent(sourceEventId).start, and a series master's start is the FIRST
+   * occurrence — keying on the master would re-time every ping to the wrong day.
+   * A recurring series added in Google therefore gets its next occurrence armed,
+   * and the following one armed on a later sweep after that ping fires.
+   */
+  private async armMissingCompanions(
+    client: Client,
+    gateway: GoogleCalendarGateway,
+    now: Date,
+  ): Promise<void> {
+    const leads = client.reminderLeads.filter((n) => Number.isInteger(n) && n > 0);
+    if (leads.length === 0) return; // client wants no automatic reminders
+
+    const horizonEnd = new Date(now.getTime() + HORIZON_MS);
+    const events = (await gateway.listEvents({ from: now, to: horizonEnd, limit: 100 })).filter(
+      (e) => !e.allDay,
+    );
+    if (events.length === 0) return;
+
+    // One round-trip each for existing companions and opt-outs, across every
+    // candidate key — no per-event queries.
+    const keys = [...new Set(events.flatMap((e) => [e.id, e.seriesId ?? e.id]))];
+    const [existing, optOuts] = await Promise.all([
+      this.prisma.task.findMany({
+        where: { clientId: client.id, sourceEventId: { in: keys }, reminderSent: false },
+        select: { sourceEventId: true },
+      }),
+      this.prisma.eventReminderOptOut.findMany({
+        where: { clientId: client.id, eventId: { in: keys } },
+        select: { eventId: true },
+      }),
+    ]);
+    const covered = new Set(existing.map((t) => t.sourceEventId));
+    const opted = new Set(optOuts.map((o) => o.eventId));
+
+    let armed = 0;
+    for (const e of events) {
+      if (armed >= CalendarSweepJob.ARM_CAP) {
+        this.logger.warn(
+          `Auto-arm cap (${CalendarSweepJob.ARM_CAP}) hit for client ${client.id} — remaining meetings arm next sweep.`,
+        );
+        break;
+      }
+      const series = e.seriesId ?? e.id;
+      if (covered.has(e.id) || covered.has(series)) continue;
+      if (opted.has(e.id) || opted.has(series)) continue;
+
+      const due = leads
+        .map((lead) => ({ lead, at: new Date(e.start.getTime() - lead * 60_000) }))
+        .filter((r) => r.at.getTime() > now.getTime());
+      if (due.length === 0) continue;
+
+      for (const { lead, at } of due) {
+        await this.prisma.task.create({
+          data: {
+            clientId: client.id,
+            title: e.title, // the cron prefixes "⏰ Reminder:" — don't double it
+            type: 'reminder',
+            reminderAt: at,
+            sourceEventId: e.id,
+            reminderLeadMinutes: lead,
+          },
+        });
+      }
+      // Mark covered so a second occurrence of the same series in this window
+      // doesn't also get armed in the same pass.
+      covered.add(e.id);
+      covered.add(series);
+      armed += 1;
+      this.logger.log(
+        `Auto-armed ${due.length} reminder(s) for calendar-added event ${e.id} (client ${client.id})`,
+      );
     }
   }
 
