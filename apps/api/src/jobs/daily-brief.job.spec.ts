@@ -59,7 +59,7 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
 
     const job = new DailyBriefJob(prisma, tenancy, telegram, crypto, google, alerts);
     // 09:00 UTC = 12:00 Beirut — well past the 08:00 brief hour.
-    await job.run(new Date('2026-07-16T09:00:00Z'));
+    await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith('bot-token', 'chat-1', expect.any(String));
@@ -83,7 +83,7 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
       { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService,
       { alert: jest.fn() } as unknown as AdminAlertService,
     );
-    await job.run(new Date('2026-07-16T09:00:00Z'));
+    await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
     expect(sendMessage).not.toHaveBeenCalled();
   });
 });
@@ -126,14 +126,65 @@ describe('DailyBriefJob — lastBriefAt guard (traveler date-shift)', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('DOES send the legitimate next-day brief (>= 20h since last)', async () => {
-    const now = new Date('2026-07-17T09:00:00Z'); // Beirut local = 12:00, date 07-17
+  it('DOES send the legitimate next-day brief', async () => {
+    const now = new Date('2026-07-17T06:00:00Z'); // Beirut local = 09:00, date 07-17
     const client = {
       ...CLIENT,
       timezone: 'Asia/Beirut',
       dailyBriefHour: 8,
       lastBriefDate: '2026-07-16',
-      lastBriefAt: new Date('2026-07-16T12:00:00Z'), // 21h before now
+      lastBriefAt: new Date('2026-07-16T06:00:00Z'), // 24h before now
+    } as unknown as Client;
+    const { job, sendMessage } = jobFor(client);
+    await job.run(now);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Production regression (Dr Wassim, 2026-07-18): a redeploy fired his 08:00
+   * brief at 17:38 — nine hours late, "here's your day" once the day was over —
+   * and that late send then sat inside the old 20h gap guard, silently
+   * suppressing the NEXT morning's brief entirely.
+   */
+  it('SKIPS the brief once the catch-up window has passed (no stale evening digest)', async () => {
+    const now = new Date('2026-07-17T14:38:00Z'); // Beirut 17:38 — 9h past the 08:00 hour
+    const client = {
+      ...CLIENT,
+      timezone: 'Asia/Beirut',
+      dailyBriefHour: 8,
+      lastBriefDate: '2026-07-16',
+      lastBriefAt: new Date('2026-07-16T05:00:00Z'),
+    } as unknown as Client;
+    const { job, sendMessage } = jobFor(client);
+    await job.run(now);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('a LATE brief yesterday must NOT suppress this morning’s brief', async () => {
+    // Exactly the production failure: sent 17:38 yesterday, now 08:00 today.
+    // Only ~14.4h apart — the old 20h guard blocked this and the client got
+    // nothing. It must send.
+    const now = new Date('2026-07-18T05:00:00Z'); // Beirut 08:00 on the 18th
+    const client = {
+      ...CLIENT,
+      timezone: 'Asia/Beirut',
+      dailyBriefHour: 8,
+      lastBriefDate: '2026-07-17',
+      lastBriefAt: new Date('2026-07-17T14:38:00Z'), // 17:38 Beirut yesterday
+    } as unknown as Client;
+    const { job, sendMessage } = jobFor(client);
+    await job.run(now);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('still sends at the exact hour for a 23:00 brief (window never wraps midnight)', async () => {
+    const now = new Date('2026-07-17T20:00:00Z'); // Beirut 23:00
+    const client = {
+      ...CLIENT,
+      timezone: 'Asia/Beirut',
+      dailyBriefHour: 23,
+      lastBriefDate: '2026-07-16',
+      lastBriefAt: new Date('2026-07-16T20:00:00Z'),
     } as unknown as Client;
     const { job, sendMessage } = jobFor(client);
     await job.run(now);

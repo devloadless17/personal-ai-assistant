@@ -26,10 +26,26 @@ const BRIEF_CONCURRENCY = 6;
  * The brief is assembled deterministically (no LLM) — a scheduled factual
  * digest must be exactly right, every time.
  */
+/**
+ * How many hours PAST their chosen hour a brief may still go out. Beyond this
+ * the day is skipped cleanly.
+ *
+ * Without a ceiling, `localHour >= dailyBriefHour` meant any tick after the hour
+ * would fire — so a restart/redeploy at 5:38 PM sent an 8 AM "here's your day"
+ * nine hours late, when the day was already over. Worse, that late send then sat
+ * inside MIN_BRIEF_GAP_MS and SUPPRESSED the next morning's brief entirely
+ * (observed in production: a client's 8 AM brief silently never arrived).
+ *
+ * Three hours leaves ample catch-up for a deploy or a brief outage while keeping
+ * the digest anchored near the time the client actually asked for.
+ */
+const MAX_CATCHUP_HOURS = 3;
+
 /** Minimum spacing between briefs. Guards against a westward timezone move
- * making the local date go BACKWARDS and re-sending the day's brief. Under 24h
- * so a legitimate next-day brief is never blocked. */
-const MIN_BRIEF_GAP_MS = 20 * 60 * 60_000;
+ * making the local date go BACKWARDS and re-sending the day's brief. Kept well
+ * under the ~21h minimum that the catch-up window now guarantees between two
+ * legitimate consecutive briefs, so it can never swallow a real next-day one. */
+const MIN_BRIEF_GAP_MS = 12 * 60 * 60_000;
 
 @Injectable()
 export class DailyBriefJob implements OnApplicationBootstrap {
@@ -94,12 +110,17 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       select: { id: true, timezone: true, dailyBriefHour: true, lastBriefDate: true, lastBriefAt: true },
     });
     const dueIds = candidates
-      .filter(
-        (c) =>
-          this.localHour(now, c.timezone) >= c.dailyBriefHour &&
+      .filter((c) => {
+        // Same local day by construction (both 0–23), so this never wraps past
+        // midnight — a 23:00 brief has a window of exactly the 23:00 hour.
+        const hoursLate = this.localHour(now, c.timezone) - c.dailyBriefHour;
+        return (
+          hoursLate >= 0 &&
+          hoursLate <= MAX_CATCHUP_HOURS &&
           c.lastBriefDate !== this.localDate(now, c.timezone) &&
-          (c.lastBriefAt == null || now.getTime() - c.lastBriefAt.getTime() >= MIN_BRIEF_GAP_MS),
-      )
+          (c.lastBriefAt == null || now.getTime() - c.lastBriefAt.getTime() >= MIN_BRIEF_GAP_MS)
+        );
+      })
       .map((c) => c.id);
     if (dueIds.length === 0) return;
     const clients = await this.prisma.client.findMany({ where: { id: { in: dueIds } } });
@@ -110,7 +131,10 @@ export class DailyBriefJob implements OnApplicationBootstrap {
   private async processClient(client: Client, now: Date): Promise<void> {
     const localDate = this.localDate(now, client.timezone);
     const localHour = this.localHour(now, client.timezone);
-    if (localHour < client.dailyBriefHour) return;
+    // Only inside the catch-up window: too early, or hours too late (a stale
+    // "here's your day" once the day is spent), and we skip to tomorrow.
+    const hoursLate = localHour - client.dailyBriefHour;
+    if (hoursLate < 0 || hoursLate > MAX_CATCHUP_HOURS) return;
     if (client.lastBriefDate === localDate) return;
     // Monotonic guard: a westward move can make localDate go backwards; without
     // this, that re-passes the date check and double-sends. 20h < 24h so the
