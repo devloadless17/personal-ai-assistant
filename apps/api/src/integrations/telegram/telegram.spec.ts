@@ -34,6 +34,7 @@ const CLIENT: Client = {
   reminderLeads: [15],
   dailyBriefHour: 7,
   lastBriefDate: null,
+  briefClaimedAt: null,
   lastBriefAt: null,
   homeTimezone: 'UTC',
   googleTimezone: null,

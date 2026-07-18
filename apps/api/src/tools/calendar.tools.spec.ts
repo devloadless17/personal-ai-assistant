@@ -678,6 +678,60 @@ describe('calendar tools — conflict gating & honesty', () => {
     expect(del).toEqual([]);
   });
 
+  it('cancelling ONE occurrence rolls its ping forward instead of reminding for it', async () => {
+    // The series' reminders must survive (future occurrences need them), but the
+    // ping belonging to the cancelled occurrence must not fire.
+    const instance: CalendarEvent = {
+      id: 'evt_20260725T090000Z',
+      seriesId: 'standup',
+      title: 'Standup',
+      start: new Date('2026-07-25T09:00:00Z'),
+      end: new Date('2026-07-25T09:15:00Z'),
+      allDay: false,
+      recurring: true,
+    };
+    const gw = makeGateway([instance]);
+    const updates: { id: string; data: Record<string, unknown> }[] = [];
+    const del: string[] = [];
+    const ctx = {
+      repo: {
+        deleteEventReminders: jest.fn((id: string) => {
+          del.push(id);
+          return Promise.resolve();
+        }),
+        getEventReminderRows: jest.fn().mockResolvedValue([
+          {
+            id: 'companion-1',
+            reminderAt: new Date('2026-07-25T08:00:00Z'), // 60 min before THIS occurrence
+            reminderLeadMinutes: 60,
+            recurrenceFreq: 'WEEKLY',
+            recurrenceInterval: 1,
+            recurrenceWeekdays: [6],
+            recurrenceAnchor: null,
+            recurrenceTimezone: 'UTC',
+          },
+        ]),
+        updateTask: jest.fn((id: string, data: Record<string, unknown>) => {
+          updates.push({ id, data });
+          return Promise.resolve({});
+        }),
+        deleteTask: jest.fn().mockResolvedValue(true),
+      } as unknown as ClientScopedRepository,
+      client: CLIENT,
+      now: new Date('2026-07-24T09:00:00Z'),
+      calendar: gw,
+    } as ToolContext;
+    await deleteCalendarEvent.execute(
+      { event_id: 'evt_20260725T090000Z', apply_to: 'this_event' },
+      ctx,
+    );
+    expect(del).toEqual([]); // series reminders NOT wiped
+    expect(updates).toHaveLength(1); // the cancelled occurrence's ping moved on
+    expect((updates[0]?.data.reminderAt as Date).getTime()).toBeGreaterThan(
+      new Date('2026-07-25T08:00:00Z').getTime(),
+    );
+  });
+
   it('every calendar tool answers honestly when Google is not connected', async () => {
     const ctx = ctxWith(undefined);
     const results = await Promise.all([

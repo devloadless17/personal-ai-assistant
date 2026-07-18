@@ -141,6 +141,11 @@ model Client {
   /// a westward timezone move (e.g. Tokyo→LA) makes the local date go BACKWARDS
   /// and would re-send the day's brief. Require >= 20h since this before sending.
   lastBriefAt DateTime?
+  /// LEASE for the daily brief: stamped before sending, cleared on a confirmed
+  /// send. Distinct from lastBriefAt (which gates spacing) so a crash between
+  /// claim and send doesn't advance the "sent" state — the brief simply becomes
+  /// re-claimable once the lease goes stale, instead of being lost for the day.
+  briefClaimedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

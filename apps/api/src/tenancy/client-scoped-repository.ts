@@ -201,6 +201,35 @@ export class ClientScopedRepository {
     });
   }
 
+  /** Full companion rows (with ids + firing state) for an event — needed to
+   * retime or drop the ping belonging to ONE cancelled occurrence. */
+  async getEventReminderRows(eventId: string): Promise<
+    {
+      id: string;
+      reminderAt: Date | null;
+      reminderLeadMinutes: number | null;
+      recurrenceFreq: RecurrenceFreq | null;
+      recurrenceInterval: number | null;
+      recurrenceWeekdays: number[];
+      recurrenceAnchor: Date | null;
+      recurrenceTimezone: string | null;
+    }[]
+  > {
+    return this.prisma.task.findMany({
+      where: { clientId: this.clientId, sourceEventId: eventId, reminderSent: false },
+      select: {
+        id: true,
+        reminderAt: true,
+        reminderLeadMinutes: true,
+        recurrenceFreq: true,
+        recurrenceInterval: true,
+        recurrenceWeekdays: true,
+        recurrenceAnchor: true,
+        recurrenceTimezone: true,
+      },
+    });
+  }
+
   /** Returns the updated task, or null if no row matched (id AND clientId). */
   async updateTask(
     id: string,

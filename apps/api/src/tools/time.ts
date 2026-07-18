@@ -261,7 +261,17 @@ export function nextOccurrence(
   const y = Number(dateParts[0]);
   const m = Number(dateParts[1]);
   const d = Number(dateParts[2]);
-  const timePart = iso.slice(11, 19); // HH:MM:SS (local wall-clock, preserved)
+  // Wall-clock time comes from the immutable ANCHOR when we have one, not from
+  // the last occurrence. Reading it from the previous occurrence let a one-off
+  // DST displacement become PERMANENT: Lebanon springs forward 00:00→01:00, so a
+  // "every day at 00:30" reminder lands at 01:30 on the transition day and then
+  // every later occurrence inherited 01:30 — an hour late for the rest of the
+  // series' life. Anchoring the time makes that displacement self-heal the very
+  // next day. (Callers keep the anchor in step with deliberate time changes, so
+  // this never resurrects a time the client moved away from.)
+  const timePart = anchor
+    ? isoInTz(anchor, timeZone).slice(11, 19)
+    : iso.slice(11, 19); // HH:MM:SS (local wall-clock, preserved)
   // For MONTHLY: the day-of-month comes from the immutable ANCHOR, not the last
   // (possibly clamped) occurrence — so "the 31st" recovers after February
   // instead of drifting to the 28th forever.

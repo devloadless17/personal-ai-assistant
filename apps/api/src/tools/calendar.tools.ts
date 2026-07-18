@@ -4,6 +4,7 @@ import type { CalendarEvent, ToolContext } from './tool.types';
 import { repeatBaseSchema, repeatToFields, repeatToRRule, type RepeatInput } from './tasks.tools';
 import {
   firstFutureOccurrence,
+  nextOccurrence,
   formatInTz,
   formatLeads,
   isoDateTime,
@@ -152,6 +153,40 @@ function companionRecurrenceFrom(repeat: RepeatInput | undefined): CompanionRecu
   return unsupported ? null : repeatToFields(repeat);
 }
 
+/**
+ * Cancelling ONE occurrence of a recurring meeting must not still ping for it.
+ *
+ * The series' companions are deliberately left intact (future occurrences still
+ * need them), but the ping belonging to the occurrence that no longer exists has
+ * to go: otherwise the client is reminded about a meeting they just cancelled.
+ * A recurring companion is rolled forward to its next occurrence; a one-shot
+ * companion armed for exactly that occurrence is removed.
+ */
+async function skipCancelledOccurrence(ctx: ToolContext, cancelled: CalendarEvent): Promise<void> {
+  const seriesId = cancelled.seriesId ?? cancelled.id;
+  const rows = await ctx.repo.getEventReminderRows(seriesId);
+  for (const r of rows) {
+    if (!r.reminderAt || r.reminderLeadMinutes == null) continue;
+    // Does this pending ping belong to the cancelled occurrence?
+    const pingForCancelled = cancelled.start.getTime() - r.reminderLeadMinutes * 60_000;
+    if (Math.abs(r.reminderAt.getTime() - pingForCancelled) > 60_000) continue;
+    if (!r.recurrenceFreq) {
+      await ctx.repo.deleteTask(r.id);
+      continue;
+    }
+    const zone = r.recurrenceTimezone ?? ctx.client.timezone;
+    const next = nextOccurrence(
+      r.reminderAt,
+      r.recurrenceFreq,
+      r.recurrenceInterval ?? 1,
+      r.recurrenceWeekdays,
+      zone,
+      r.recurrenceAnchor,
+    );
+    await ctx.repo.updateTask(r.id, { reminderAt: next });
+  }
+}
+
 async function armEventReminders(
   ctx: ToolContext,
   event: CalendarEvent,
@@ -225,9 +260,12 @@ async function armEventReminders(
   if (armed.length === 0) {
     if (anyFailed)
       return " (The meeting is on your calendar, but I couldn't set the Telegram reminder — ask me to add it again.)";
-    // Every lead was already in the past (the meeting is very soon) — say so
-    // instead of staying silent, so the client knows there's no ping coming.
-    return " (The meeting is sooner than your reminder time, so I didn't set a separate reminder.)";
+    // Every lead resolved to a past time. Distinguish the two very different
+    // reasons — telling a client "the meeting is sooner than your reminder time"
+    // about a meeting weeks away is simply false.
+    return eventStart.getTime() > ctx.now.getTime()
+      ? " (The meeting is sooner than your reminder time, so I didn't set a separate reminder.)"
+      : " (I couldn't work out a future reminder time for this meeting — tell the client no reminder is set and ask them to set one explicitly.)";
   }
   const eachTime = companionRec ? ' each time' : '';
   let note = ` I'll remind you ${formatLeads(armed)} before${eachTime}.`;
@@ -555,7 +593,15 @@ export const updateCalendarEvent = defineTool({
           reminderNote = await armEventReminders(
             ctx,
             event,
-            event.start,
+            // A RECURRING companion rolls forward from the master's start via
+            // firstFutureOccurrence, so the master is the right anchor. A
+            // ONE-SHOT companion cannot: for a series edit the master's start is
+            // the series' FIRST occurrence — often months past — so every lead
+            // resolved to a past time, nothing was armed, and the client was told
+            // "the meeting is sooner than your reminder time" for a meeting weeks
+            // away, with its reminder silently gone. Anchor those on the time the
+            // client actually asked for instead.
+            companionRec ? event.start : (effStart ?? event.start),
             positive,
             companionRec,
             zone,
@@ -635,6 +681,10 @@ export const deleteCalendarEvent = defineTool({
     // by the master id would wipe reminders for every remaining occurrence.
     if (applyToSeries || !existing.recurring) {
       await ctx.repo.deleteEventReminders(existing.seriesId ?? input.event_id);
+    } else {
+      // Single occurrence cancelled: keep the series' reminders, but never ping
+      // for the occurrence that no longer exists.
+      await skipCancelledOccurrence(ctx, existing).catch(() => undefined);
     }
     const scope = applyToSeries
       ? ' (whole recurring series)'

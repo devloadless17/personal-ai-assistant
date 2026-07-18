@@ -48,6 +48,11 @@ const MAX_CATCHUP_HOURS = 3;
  * legitimate consecutive briefs, so it can never swallow a real next-day one. */
 const MIN_BRIEF_GAP_MS = 12 * 60 * 60_000;
 
+/** How long a brief lease is held before another tick may re-claim it. Longer
+ * than a tick (10 min) so a live send is never double-claimed, short enough that
+ * a crashed attempt retries well inside the catch-up window. */
+const BRIEF_LEASE_MS = 15 * 60_000;
+
 @Injectable()
 export class DailyBriefJob implements OnApplicationBootstrap {
   private readonly logger = new Logger(DailyBriefJob.name);
@@ -145,30 +150,46 @@ export class DailyBriefJob implements OnApplicationBootstrap {
       return;
     }
 
-    // Atomic claim on (id, lastBriefDate != today). Must handle the never-sent
-    // case EXPLICITLY: in SQL `NOT (lastBriefDate = today)` is NULL (not true)
-    // when lastBriefDate IS NULL, so a `NOT: {...}` form would never match a
-    // first-ever brief and the client would be skipped forever. The OR covers
-    // both "never sent" and "sent on a previous day".
+    // LEASE, not a commit. Previously this wrote lastBriefDate BEFORE sending and
+    // relied on a JS catch to revert: a restart/OOM in that window left the
+    // client marked as briefed for the day, so the brief silently never arrived
+    // AND diagnostics showed it as delivered. Now we only claim a short lease
+    // here; "sent" state advances only after a confirmed delivery, so a crash
+    // makes the brief re-claimable instead of losing it (at-least-once, matching
+    // the reminder job).
+    //
+    // The null-handling is deliberate: in SQL `NOT (col = x)` is NULL — not true
+    // — when col IS NULL, so a bare `not` form would never match a first-ever
+    // brief and that client would be skipped forever. The OR covers both.
+    const leaseCutoff = new Date(now.getTime() - BRIEF_LEASE_MS);
     const { count } = await this.prisma.client.updateMany({
       where: {
         id: client.id,
         OR: [{ lastBriefDate: null }, { lastBriefDate: { not: localDate } }],
+        AND: [
+          { OR: [{ briefClaimedAt: null }, { briefClaimedAt: { lt: leaseCutoff } }] },
+        ],
       },
-      data: { lastBriefDate: localDate, lastBriefAt: now },
+      data: { briefClaimedAt: now },
     });
     if (count === 0) return;
 
     try {
       const text = await this.buildBrief(client, now);
       await this.notifier.send(client, text, 'brief');
+      // CONFIRMED — only now advance the "sent" state and release the lease.
+      await this.prisma.client.updateMany({
+        where: { id: client.id },
+        data: { lastBriefDate: localDate, lastBriefAt: now, briefClaimedAt: null },
+      });
       this.lastSentCount += 1;
       this.logger.log(`Daily brief sent to client ${client.id} (${localDate})`);
     } catch (err) {
-      // Revert the claim so a later tick today retries.
+      // Release the lease so a later tick today retries. lastBriefDate was
+      // never advanced, so there is nothing to revert.
       await this.prisma.client.updateMany({
-        where: { id: client.id, lastBriefDate: localDate },
-        data: { lastBriefDate: client.lastBriefDate, lastBriefAt: client.lastBriefAt },
+        where: { id: client.id },
+        data: { briefClaimedAt: null },
       });
       this.logger.error(
         `Daily brief failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,

@@ -1,4 +1,5 @@
 import {
+  inclusiveUntil,
   firstFutureOccurrence,
   formatEventWhen,
   localWeekday,
@@ -165,5 +166,46 @@ describe('formatEventWhen + localWeekday', () => {
   it('localWeekday returns 0=Sun..6=Sat in the client zone', () => {
     expect(localWeekday(at('2026-07-19T12:00:00'), TZ)).toBe(0); // Sunday
     expect(localWeekday(at('2026-07-20T12:00:00'), TZ)).toBe(1); // Monday
+  });
+});
+
+describe('nextOccurrence — DST-skipped hour self-heals via the anchor', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (local: string): Date => new Date(withClientOffset(local, TZ));
+  const localHM = (d: Date): string => isoInTz(d, TZ).slice(11, 16);
+
+  /**
+   * Lebanon springs forward 00:00 → 01:00, so 00:30 does not exist that day and
+   * the occurrence is displaced to 01:30. Without an anchor the series reads its
+   * wall-clock from the PREVIOUS occurrence, so it stayed at 01:30 forever — a
+   * daily 00:30 reminder permanently an hour late.
+   */
+  it('returns to the anchored 00:30 after the transition instead of sticking at 01:30', () => {
+    const anchor = at('2026-03-20T00:30:00'); // the intended local time
+    const displaced = at('2026-03-29T01:30:00'); // what the skipped hour produced
+    const next = nextOccurrence(displaced, 'DAILY', 1, [], TZ, anchor);
+    expect(localHM(next)).toBe('00:30'); // self-healed, not 01:30
+  });
+
+  it('without an anchor it still preserves the previous occurrence wall-clock', () => {
+    const r = nextOccurrence(at('2026-07-16T09:30:00'), 'DAILY', 1, [], TZ);
+    expect(localHM(r)).toBe('09:30');
+  });
+});
+
+describe('inclusiveUntil — a date-only end date includes its own final day', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (local: string): Date => new Date(withClientOffset(local, TZ));
+
+  it('extends a local-midnight until to the end of that day', () => {
+    const until = at('2026-07-31T00:00:00');
+    const inclusive = inclusiveUntil(until, TZ);
+    // The 09:00 occurrence ON July 31 must fall INSIDE the series.
+    expect(at('2026-07-31T09:00:00').getTime()).toBeLessThan(inclusive.getTime());
+  });
+
+  it('leaves an explicit time untouched', () => {
+    const until = at('2026-07-31T14:00:00');
+    expect(inclusiveUntil(until, TZ).getTime()).toBe(until.getTime());
   });
 });

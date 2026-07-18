@@ -3,6 +3,15 @@ import type { RecurrenceFreq, Task } from '@prisma/client';
 import { defineTool } from './tool.types';
 import { formatInTz, inclusiveUntil, isoDateTime, isValidTimezone } from './time';
 
+/** A task supports a single ping. The schema accepts a list because the model
+ * naturally reaches for the calendar tool's form; the EARLIEST lead (largest
+ * number of minutes before) is the safe choice — the client is warned sooner,
+ * never later than they asked. */
+function singleLead(v: number | number[] | null | undefined): number | null | undefined {
+  if (v === null || v === undefined) return v;
+  return Array.isArray(v) ? Math.max(...v) : v;
+}
+
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 /** Base recurrence shape the model provides. */
@@ -154,13 +163,16 @@ export const createTask = defineTool({
     type: z.enum(['task', 'reminder']).optional().describe('Default: task.'),
     due_at: isoDateTime.optional().describe('Due datetime (ISO 8601), if any.'),
     reminder_minutes_before: z
-      .number()
-      .int()
-      .min(0)
-      .max(10080)
+      .union([
+        z.number().int().min(0).max(10080),
+        // A task supports ONE ping, but the model naturally reaches for the
+        // calendar tool's list form ("an hour and 10 min before"). Accepting it
+        // and using the earliest beats a hard zod rejection that burns a turn.
+        z.array(z.number().int().min(0).max(10080)).min(1).max(5),
+      ])
       .optional()
       .describe(
-        'Minutes before due_at to send the reminder ping (e.g. 15 = ping 15 min before the due time). Use for a to-do that has a due time; use reminder_at instead when the client names the exact ping time.',
+        'Minutes before due_at to send the reminder ping (e.g. 15 = ping 15 min before the due time). A task gets ONE ping — if you pass a list, the EARLIEST lead is used. Use reminder_at instead when the client names the exact ping time.',
       ),
     reminder_at: isoDateTime
       .optional()
@@ -201,7 +213,7 @@ export const createTask = defineTool({
         : undefined;
     const rem = resolveReminderAt(
       relativeReminderAt ?? input.reminder_at,
-      input.reminder_minutes_before,
+      singleLead(input.reminder_minutes_before),
       input.due_at,
     );
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was created.`;
@@ -273,6 +285,15 @@ export const updateTask = defineTool({
       .nullable()
       .optional()
       .describe('New reminder lead time in minutes before due, or null to clear the reminder.'),
+    reminder_in_minutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(44640)
+      .optional()
+      .describe(
+        'Reschedule the ping to a RELATIVE time counted from NOW ("push it to 2 hours from now" → 120). The system computes the exact time — ALWAYS use this for relative times rather than calculating a clock time yourself (you WILL get the arithmetic wrong). Takes precedence over reminder_at.',
+      ),
     reminder_at: isoDateTime
       .nullable()
       .optional()
@@ -284,7 +305,7 @@ export const updateTask = defineTool({
     notes: z.string().max(2000).nullable().optional(),
   }),
   async execute(input, ctx) {
-    const { task_id, due_at, reminder_at, reminder_minutes_before, repeat, ...rest } = input;
+    const { task_id, due_at, reminder_at, reminder_in_minutes, reminder_minutes_before, repeat, ...rest } = input;
 
     // We may need the existing task to resolve a lead-time, to keep a
     // reminder's lead when only the due time moves, OR to honour the
@@ -295,11 +316,18 @@ export const updateTask = defineTool({
       (reminder_minutes_before != null && due_at === undefined) ||
       due_at !== undefined ||
       reminder_at !== undefined ||
+      reminder_in_minutes !== undefined ||
       rest.type === 'reminder';
     const existing = needsExisting ? await ctx.repo.findTaskById(task_id) : null;
 
     const dueRef = due_at !== undefined ? due_at : (existing?.dueAt ?? null);
-    let rem = resolveReminderAt(reminder_at, reminder_minutes_before, dueRef);
+    // A RELATIVE reschedule ("push it to 2 hours from now") is computed HERE, so
+    // the model never does clock arithmetic it gets wrong. Same rule as create.
+    const relativeReminderAt =
+      reminder_in_minutes !== undefined
+        ? new Date(ctx.now.getTime() + reminder_in_minutes * 60_000)
+        : undefined;
+    let rem = resolveReminderAt(relativeReminderAt ?? reminder_at, reminder_minutes_before, dueRef);
     if ('error' in rem) return `ERROR: ${rem.error}. Nothing was changed.`;
 
     // F6: rescheduling the due time (with no explicit reminder change) shifts

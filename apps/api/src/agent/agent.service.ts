@@ -69,7 +69,17 @@ const COMPLETION_CLAIM = new RegExp(
  * fabrication. Consulted for EVERY completion-claim check.
  */
 const FAILURE_ACK =
-  /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to|booked|scheduled|planned|due|on)|not able|didn'?t go through|you'?re free|you have nothing|already (done|set|scheduled|booked))\b/i;
+  /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to|booked|scheduled|planned|due|on)|not able|didn'?t go through|you'?re free|you have nothing)\b/i;
+
+/**
+ * "that's already set / already booked" — an assertion about STORED STATE.
+ * It only exempts a reply when a tool actually ran this turn to substantiate it.
+ * Tool results aren't persisted (only message text is), so on a later turn the
+ * model has no evidence at all: without this gate it could confidently answer
+ * "yes, your 9:30 reminder is already set" from its own earlier message, long
+ * after the reminder was deleted in the Google app or never armed.
+ */
+const ALREADY_STATE = /\balready (done|set|scheduled|booked)\b/i;
 
 /**
  * A claim that THIS turn performed a state CHANGE ("Cancelled …", "I've moved
@@ -274,9 +284,12 @@ export class AgentService {
       // An honest failure/no-op/availability acknowledgement also exempts the
       // reply. Correction fires only when the reply claims a completed action
       // that a real mutation this turn didn't back up.
+      // An "already set" claim counts as an honest acknowledgement only when a
+      // tool ran this turn to back it up.
+      const honestAck = FAILURE_ACK.test(text) || (ALREADY_STATE.test(text) && anyToolRan);
       const fabricated =
         claimsCompletion &&
-        !FAILURE_ACK.test(text) &&
+        !honestAck &&
         !readOnlyTurn &&
         (!successfulMutation || mutationError);
       if (text && fabricated && !corrected) {
