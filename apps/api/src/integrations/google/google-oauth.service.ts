@@ -10,6 +10,40 @@ import type { Env } from '../../config/env.validation';
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 
+/**
+ * Hard ceiling on the OAuth token refresh.
+ *
+ * google-auth-library builds its refresh request from RETRY_CONFIG only and
+ * never sets a timeout, and gaxios applies one ONLY when given — so unlike every
+ * calendar.* call (which passes an explicit timeout), the refresh could hang on a
+ * dead socket forever. That is not a slow call, it is a permanent wedge: it would
+ * park a calendar-sweep worker so the tick's `running` flag never clears (killing
+ * conflict alerts, reminder reconcile and auto-arm for EVERY client until
+ * restart), stall the daily brief the same way, and — because the Telegram path
+ * awaits it inside the per-client promise chain — leave that client unable to
+ * receive any further message for the life of the process, all while /health
+ * stayed green. Bounded here so it degrades to a normal, catchable failure.
+ */
+const REFRESH_TIMEOUT_MS = 15_000;
+
+/** Reject if `p` hasn't settled within `ms` — the rejection flows into the
+ * caller's existing error handling, so a hang degrades to an ordinary failure. */
+async function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${ms}ms`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** What we persist (encrypted) per client. */
 const tokenBundleSchema = z.object({
   refresh_token: z.string(),
@@ -131,7 +165,11 @@ export class GoogleOAuthService {
       !bundle.access_token || !bundle.expiry_date || bundle.expiry_date < Date.now() + 60_000;
     if (needsRefresh) {
       try {
-        const { credentials } = await oauth.refreshAccessToken();
+        const { credentials } = await withDeadline(
+          oauth.refreshAccessToken(),
+          REFRESH_TIMEOUT_MS,
+          'Google token refresh',
+        );
         const updated: GoogleTokenBundle = {
           refresh_token: credentials.refresh_token ?? bundle.refresh_token,
           access_token: credentials.access_token ?? undefined,

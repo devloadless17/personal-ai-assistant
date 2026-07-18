@@ -58,12 +58,12 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
     const google = { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService;
     const alerts = { alert: jest.fn().mockResolvedValue(undefined) } as unknown as AdminAlertService;
 
-    const job = new DailyBriefJob(prisma, tenancy, telegram, crypto, google, alerts, { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService);
+    const job = new DailyBriefJob(prisma, tenancy, telegram, crypto, google, alerts, { send: sendMessage, record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService);
     // 09:00 UTC = 12:00 Beirut — well past the 08:00 brief hour.
     await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith('bot-token', 'chat-1', expect.any(String));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), expect.any(String), 'brief');
     expect(job.lastSentCount).toBe(1);
   });
 
@@ -83,7 +83,7 @@ describe('DailyBriefJob — first-ever brief is not skipped by NULL lastBriefDat
       { decrypt: () => 't' } as unknown as CryptoService,
       { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService,
       { alert: jest.fn() } as unknown as AdminAlertService,
-      { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
+      { send: sendMessage, record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
     );
     await job.run(new Date('2026-07-16T06:00:00Z')); // 09:00 Beirut — inside the 08:00 window
     expect(sendMessage).not.toHaveBeenCalled();
@@ -107,7 +107,7 @@ describe('DailyBriefJob — lastBriefAt guard (traveler date-shift)', () => {
       { decrypt: () => 'bot-token' } as unknown as CryptoService,
       { authorizedClientFor: jest.fn().mockResolvedValue(null) } as unknown as GoogleOAuthService,
       { alert: jest.fn().mockResolvedValue(undefined) } as unknown as AdminAlertService,
-      { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
+      { send: sendMessage, record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService,
     );
     return { job, sendMessage };
   }

@@ -74,7 +74,14 @@ function makeJob(opts?: {
     }),
   } as unknown as AdminAlertService;
 
-  return { job: new ReminderJob(prisma, telegram, crypto, alertsSvc, { record: jest.fn().mockResolvedValue(undefined) } as unknown as ClientNotifierService), sent, updates, alerts };
+  return { job: new ReminderJob(prisma, telegram, crypto, alertsSvc, {
+      send: jest.fn((_c: unknown, text: string) => {
+        if (opts?.sendFails) return Promise.reject(new Error('telegram down'));
+        sent.push(text);
+        return Promise.resolve(undefined);
+      }),
+      record: jest.fn().mockResolvedValue(undefined),
+    } as unknown as ClientNotifierService), sent, updates, alerts };
 }
 
 describe('ReminderJob — at-least-once lease/send/confirm', () => {

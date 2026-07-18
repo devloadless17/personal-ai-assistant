@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { RecurrenceFreq, Task } from '@prisma/client';
 import { defineTool } from './tool.types';
-import { formatInTz, isoDateTime, isValidTimezone } from './time';
+import { formatInTz, inclusiveUntil, isoDateTime, isValidTimezone } from './time';
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -46,7 +46,7 @@ export function repeatToRRule(repeat: RepeatInput): string[] {
   return [`RRULE:${parts.join(';')}`];
 }
 
-export function repeatToFields(repeat: RepeatInput): {
+export function repeatToFields(repeat: RepeatInput, timeZone?: string): {
   recurrenceFreq: RecurrenceFreq;
   recurrenceInterval: number;
   recurrenceWeekdays: number[];
@@ -56,7 +56,13 @@ export function repeatToFields(repeat: RepeatInput): {
     recurrenceFreq: repeat.freq.toUpperCase() as RecurrenceFreq,
     recurrenceInterval: repeat.interval ?? 1,
     recurrenceWeekdays: repeat.freq === 'weekly' ? (repeat.weekdays ?? []) : [],
-    recurrenceUntil: repeat.until ?? null,
+    // A date-only "until" anchors to local midnight; make it inclusive of
+    // that final day so the last occurrence isn't silently dropped.
+    recurrenceUntil: repeat.until
+      ? timeZone
+        ? inclusiveUntil(repeat.until, timeZone)
+        : repeat.until
+      : null,
   };
 }
 
@@ -142,7 +148,7 @@ export const getTasks = defineTool({
 export const createTask = defineTool({
   name: 'create_task',
   description:
-    "Create a task or reminder in the client's task list (NOT on the calendar — calendar events are separate). To send a Telegram reminder, use reminder_minutes_before (e.g. 15 = ping 15 min before due) — this respects the client's preferred lead time — or reminder_at for an exact time. When the client asks to be reminded, you MUST set reminder_at or reminder_minutes_before — a due time alone does not send a ping.",
+    "Create a task or reminder in the client's task list (NOT on the calendar — calendar events are separate). To send a Telegram reminder, use reminder_minutes_before (e.g. 15 = ping 15 min before the due time) or reminder_at for an exact time. NOTE: unlike meetings, a task does NOT get the client's default reminder lead times automatically — if they want a ping you must set one of these explicitly. When the client asks to be reminded, you MUST set reminder_at or reminder_minutes_before — a due time alone does not send a ping.",
   schema: z.object({
     title: z.string().min(1).max(500).describe('Short task title.'),
     type: z.enum(['task', 'reminder']).optional().describe('Default: task.'),
@@ -239,7 +245,7 @@ export const createTask = defineTool({
       // travel (e.g. "8am" becoming 2pm elsewhere).
       ...(input.repeat
         ? {
-            ...repeatToFields(input.repeat),
+            ...repeatToFields(input.repeat, ctx.client.timezone),
             recurrenceAnchor: reminderAt,
             recurrenceTimezone: input.recurrence_timezone ?? ctx.client.timezone,
           }
@@ -354,7 +360,7 @@ export const updateTask = defineTool({
               recurrenceUntil: null,
               recurrenceAnchor: null,
             }
-          : { ...repeatToFields(repeat), recurrenceAnchor: resultingReminder };
+          : { ...repeatToFields(repeat, ctx.client.timezone), recurrenceAnchor: resultingReminder };
 
     const task = await ctx.repo.updateTask(task_id, {
       ...rest,

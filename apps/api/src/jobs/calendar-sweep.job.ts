@@ -130,14 +130,12 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
       const tz = await this.timezone.sync(client);
       if (tz.synced && tz.switched) {
         client = { ...client, timezone: tz.to };
-        const botToken = client.telegramBotTokenEnc
-          ? this.crypto.decrypt(client.telegramBotTokenEnc)
-          : null;
-        if (botToken && client.telegramChatId) {
-          const notice = `🌍 Looks like you're on ${tz.to} time now — I've switched your daily brief, reminders and new scheduling to match. Already-booked events keep their original time. Reply "keep home time" to stay on your home zone instead.`;
-          await this.telegram.sendMessage(botToken, client.telegramChatId, notice);
-          await this.notifier.record(client.id, notice, 'alert');
-        }
+        const notice = `🌍 Looks like you're on ${tz.to} time now — I've switched your daily brief, reminders and new scheduling to match. Already-booked events keep their original time. Reply "keep home time" to stay on your home zone instead.`;
+        await this.notifier.send(client, notice, 'alert').catch((err: unknown) => {
+          this.logger.error(
+            `Timezone notice failed for client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
       }
 
       const auth = await this.google.authorizedClientFor(client);
@@ -196,8 +194,7 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
         // forever (the bug of recording the dedup before the send). A rare
         // duplicate on the tiny send-ok/write-fail window beats a lost alert —
         // the same durability rule the reminder lease uses.
-        await this.telegram.sendMessage(botToken, client.telegramChatId, msg);
-        await this.notifier.record(client.id, msg, 'alert');
+        await this.notifier.send(client, msg, 'alert');
         try {
           await this.prisma.calendarConflictAlert.create({
             data: { clientId: client.id, conflictKey },
@@ -286,10 +283,13 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
       const patch: Prisma.TaskUpdateManyMutationInput = {};
       // Title drift — applies to one-off AND recurring (a title is series-wide).
       if (ev.title && ev.title !== c.title) patch.title = ev.title;
-      // Time drift — one-off only. (getEvent on a recurring master returns the
-      // series' FIRST start, not this companion's occurrence, so re-timing a
-      // recurring companion from it would be wrong; the cron owns those.)
-      if (!c.recurrenceFreq && c.reminderLeadMinutes != null && c.reminderAt) {
+      // Time drift — ONLY for a genuinely non-recurring event. Two distinct
+      // reasons, both required:
+      //  - the companion itself recurs → the reminder cron owns its fire times;
+      //  - the EVENT recurs → getEvent(masterId) returns the series' FIRST
+      //    occurrence, so re-timing any companion from it would move the ping to
+      //    the wrong day (companions are keyed on the master, like every bot path).
+      if (!c.recurrenceFreq && !ev.recurring && c.reminderLeadMinutes != null && c.reminderAt) {
         const expected = new Date(ev.start.getTime() - c.reminderLeadMinutes * 60_000);
         if (Math.abs(expected.getTime() - c.reminderAt.getTime()) > 60_000) {
           patch.reminderAt = expected;
@@ -323,12 +323,17 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
    *  - the client hasn't explicitly turned reminders off for it (opt-out marker)
    *  - the resulting ping is still in the future
    *
-   * Companions are keyed on the OCCURRENCE id, not the series master. That
-   * matters: reconcileCompanions re-times a one-off companion from
-   * getEvent(sourceEventId).start, and a series master's start is the FIRST
-   * occurrence — keying on the master would re-time every ping to the wrong day.
-   * A recurring series added in Google therefore gets its next occurrence armed,
-   * and the following one armed on a later sweep after that ping fires.
+   * Companions are keyed on the SERIES MASTER id (`seriesId ?? id`) — the exact
+   * key every bot path uses (deleteEventReminders / renameEventReminders /
+   * getEventReminders / the reminder-policy marker). Keying on the occurrence id
+   * instead makes a sweep-armed reminder invisible to the bot: "cancel the
+   * standup" and "stop reminding me" would delete 0 rows and keep pinging, and
+   * "change it to 30 minutes" would add a third ping instead of replacing two.
+   * (reconcileCompanions never re-times a companion whose live event recurs, so
+   * master keying cannot drag a ping onto the series' first occurrence.)
+   *
+   * A recurring series added in Google gets its next occurrence armed, and the
+   * following one armed on a later sweep once that ping has fired.
    */
   private async armMissingCompanions(
     client: Client,
@@ -384,7 +389,7 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
             title: e.title, // the cron prefixes "⏰ Reminder:" — don't double it
             type: 'reminder',
             reminderAt: at,
-            sourceEventId: e.id,
+            sourceEventId: series, // series master — the key every bot path uses
             reminderLeadMinutes: lead,
           },
         });

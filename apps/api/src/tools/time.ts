@@ -20,14 +20,30 @@ export function isValidTimezone(tz: string): boolean {
   }
 }
 
-/** ISO 8601 datetime string → Date, rejecting anything unparsable. */
-export const isoDateTime = z
-  .string()
-  .refine((s) => !Number.isNaN(Date.parse(s)), { message: 'must be an ISO 8601 datetime' })
-  .transform((s) => new Date(s));
-
 /** ISO date/datetime that carries NO timezone marker (no trailing Z / ±HH:MM). */
 const OFFSETLESS_ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(\.\d+)?)?$/;
+
+/** STRICT ISO 8601: the offset-less forms above, or the same with a trailing
+ * `Z` / `±HH:MM`. Deliberately narrower than Date.parse. */
+const STRICT_ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
+/**
+ * ISO 8601 datetime string → Date, accepting ONLY strict ISO.
+ *
+ * This must not fall back to Date.parse's leniency: `withClientOffset` anchors a
+ * value to the client's zone only when it matches the ISO shape, so a merely
+ * *parseable* string like "July 20, 2026 3:00 PM" would slip past the anchoring
+ * and be interpreted in the SERVER's zone — silently booking a Beirut client's
+ * 3 PM as 6 PM local, confirmed as correct. Rejecting it here turns a silent
+ * wrong-time into a validation error the model can see and retry.
+ */
+export const isoDateTime = z
+  .string()
+  .refine((s) => STRICT_ISO.test(s.trim()) && !Number.isNaN(Date.parse(s.trim())), {
+    message:
+      'must be a strict ISO 8601 datetime, e.g. "2026-07-20T15:00" or "2026-07-20T15:00:00+03:00"',
+  })
+  .transform((s) => new Date(s.trim()));
 
 /** True when `s` is an ISO date/datetime with no explicit timezone offset. */
 export function isOffsetlessIso(s: string): boolean {
@@ -53,6 +69,21 @@ export function withClientOffset(raw: string, timeZone: string): string {
   const first = isoInTz(new Date(`${base}Z`), timeZone).slice(-6);
   const second = isoInTz(new Date(`${base}${first}`), timeZone).slice(-6);
   return `${base}${second}`;
+}
+
+/**
+ * Make a recurrence `until` INCLUSIVE of its final day.
+ *
+ * "every day at 9am until July 31" arrives as a date-only value, which anchors
+ * to local MIDNIGHT on the 31st. The series check is a strict `next > until`, so
+ * the 31st's own 09:00 occurrence is already past it: that reminder silently
+ * never fires AND the series is closed as done, so it can't be recovered. When
+ * `until` sits exactly on a local midnight, treat it as the end of that day.
+ */
+export function inclusiveUntil(until: Date, timeZone: string): Date {
+  const local = isoInTz(until, timeZone);
+  if (local.slice(11, 19) !== '00:00:00') return until;
+  return new Date(withClientOffset(`${local.slice(0, 10)}T23:59:59.999`, timeZone));
 }
 
 /** Format a Date in the client's timezone, e.g. "Fri, Jul 18 2026, 3:00 PM". */

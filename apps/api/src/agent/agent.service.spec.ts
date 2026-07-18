@@ -229,7 +229,7 @@ describe('AgentService — reliability invariants', () => {
 
     const reply = await agent.respond(CLIENT);
     expect(createMessage).toHaveBeenCalledTimes(8); // MAX_TOOL_ITERATIONS
-    expect(reply).toContain('stopped safely');
+    expect(reply).toContain('stopped partway');
   });
 
   it('calendar tools answer honestly when Google is not connected', async () => {

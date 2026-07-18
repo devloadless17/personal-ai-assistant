@@ -161,15 +161,7 @@ export class DailyBriefJob implements OnApplicationBootstrap {
 
     try {
       const text = await this.buildBrief(client, now);
-      const botToken = client.telegramBotTokenEnc
-        ? this.crypto.decrypt(client.telegramBotTokenEnc)
-        : null;
-      if (!botToken || !client.telegramChatId) {
-        throw new Error('client has no bot token or bound chat');
-      }
-      await this.telegram.sendMessage(botToken, client.telegramChatId, text);
-      // Recorded only after a confirmed send, so the admin log mirrors reality.
-      await this.notifier.record(client.id, text, 'brief');
+      await this.notifier.send(client, text, 'brief');
       this.lastSentCount += 1;
       this.logger.log(`Daily brief sent to client ${client.id} (${localDate})`);
     } catch (err) {

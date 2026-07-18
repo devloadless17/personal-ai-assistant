@@ -71,6 +71,24 @@ const COMPLETION_CLAIM = new RegExp(
 const FAILURE_ACK =
   /\b(couldn'?t|could not|can'?t|cannot|didn'?t|did not|wasn'?t|was not|unable|failed|no changes|nothing (was|to|booked|scheduled|planned|due|on)|not able|didn'?t go through|you'?re free|you have nothing|already (done|set|scheduled|booked))\b/i;
 
+/**
+ * A claim that THIS turn performed a state CHANGE ("Cancelled …", "I've moved
+ * it", "Deleted"). Distinct from a status read-back ("your reminder IS set for
+ * 9:30"), which a read-only turn is legitimately allowed to make.
+ *
+ * The read-only exemption below must NOT cover these: "read the calendar, then
+ * claim a deletion" is precisely the fabrication the guard exists to catch —
+ * e.g. "cancel my 3pm with Rami" → the model calls get_calendar_events, replies
+ * "Cancelled ✅", never calls delete_calendar_event, and the meeting stays.
+ */
+const MUTATION_CLAIM = new RegExp(
+  [
+    "^\\s*(added|created|booked|scheduled|rescheduled|moved|updated|deleted|removed|cancell?ed|marked|saved)\\b",
+    "\\bi(?:'ve| have)?\\s+(?:just\\s+)?(added|created|booked|scheduled|rescheduled|moved|updated|changed|deleted|removed|cancell?ed|marked|saved|put|arranged|logged)\\b",
+  ].join('|'),
+  'i',
+);
+
 /** Tool-input keys whose values are datetimes (the only fields we anchor). */
 const DATETIME_KEYS = new Set(['due_at', 'reminder_at', 'start', 'end', 'from', 'to', 'until']);
 
@@ -249,7 +267,10 @@ export class AgentService {
       // read-back answer ("yes, your reminder IS set for 9:30") grounded in that
       // read — never force a correction on it, or we'd push a duplicate mutation.
       const mutationAttempted = successfulMutation || mutationError;
-      const readOnlyTurn = anyToolRan && !mutationAttempted;
+      // The exemption covers a status READ-BACK grounded in the read that just
+      // ran — but never a claim that this turn CHANGED something, which no read
+      // tool can substantiate.
+      const readOnlyTurn = anyToolRan && !mutationAttempted && !MUTATION_CLAIM.test(text);
       // An honest failure/no-op/availability acknowledgement also exempts the
       // reply. Correction fires only when the reply claims a completed action
       // that a real mutation this turn didn't back up.
@@ -278,7 +299,7 @@ export class AgentService {
     }
 
     this.logger.warn(`Tool-iteration ceiling reached for client ${ctx.client.id}`);
-    return 'That request needed more steps than I allow in one go, so I stopped safely. What I completed is recorded; please break the request into smaller parts.';
+    return 'That needed more steps than I can do in one go, so I stopped partway. Some of it may already be done — please check before asking again, and send the rest in smaller pieces.';
   }
 
   /**

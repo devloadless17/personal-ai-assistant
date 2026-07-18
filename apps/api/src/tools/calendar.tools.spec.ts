@@ -77,8 +77,8 @@ function ctxWith(gateway?: CalendarGateway): ToolContext {
   const repo = {
     createTask: jest.fn().mockResolvedValue({}),
     deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+    setEventReminderPolicyPinned: jest.fn().mockResolvedValue(undefined),
     renameEventReminders: jest.fn().mockResolvedValue(undefined),
-    setEventReminderOptOut: jest.fn().mockResolvedValue(undefined),
     getEventReminderLead: jest.fn().mockResolvedValue(null),
     getEventReminder: jest.fn().mockResolvedValue(null),
     getEventReminders: jest.fn().mockResolvedValue([]),
@@ -145,6 +145,7 @@ describe('calendar tools — conflict gating & honesty', () => {
           return Promise.resolve({});
         }),
         deleteEventReminders: jest.fn().mockResolvedValue(undefined),
+        setEventReminderPolicyPinned: jest.fn().mockResolvedValue(undefined),
         getEventReminder: jest.fn().mockResolvedValue(null),
       } as unknown as ClientScopedRepository,
       client: CLIENT, // UTC
@@ -182,7 +183,7 @@ describe('calendar tools — conflict gating & honesty', () => {
           return Promise.resolve({});
         }),
         deleteEventReminders: jest.fn().mockResolvedValue(undefined),
-        setEventReminderOptOut: jest.fn().mockResolvedValue(undefined),
+        setEventReminderPolicyPinned: jest.fn().mockResolvedValue(undefined),
         getEventReminders: jest.fn().mockResolvedValue([]),
       } as unknown as ClientScopedRepository,
       client: { ...CLIENT, ...clientOver },
@@ -609,6 +610,7 @@ describe('calendar tools — conflict gating & honesty', () => {
           created.push(d);
           return Promise.resolve({});
         }),
+        setEventReminderPolicyPinned: jest.fn().mockResolvedValue(undefined),
         deleteEventReminders: jest.fn((id: string) => {
           del.push(id);
           return Promise.resolve();
@@ -654,6 +656,7 @@ describe('calendar tools — conflict gating & honesty', () => {
           renamed.push({ id, title });
           return Promise.resolve();
         }),
+        setEventReminderPolicyPinned: jest.fn().mockResolvedValue(undefined),
         deleteEventReminders: jest.fn((id: string) => {
           del.push(id);
           return Promise.resolve();

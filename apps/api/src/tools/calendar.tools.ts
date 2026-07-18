@@ -34,7 +34,7 @@ function renderConflicts(conflicts: CalendarEvent[], tz: string): string {
 export const getCalendarEvents = defineTool({
   name: 'get_calendar_events',
   description:
-    'Read the client\'s REAL Google Calendar for a time window — live, includes everything on it regardless of how it was added (by you or directly in the Calendar app). Call this before answering any schedule question and before creating/moving events.',
+    'Read the client\'s REAL Google Calendar for a time window — live, includes everything on it regardless of how it was added (by you or directly in the Calendar app). Call this before answering any schedule question, and to get an event id before updating or deleting one. You do NOT need it before creating or moving an event — those tools check for clashes automatically, so an extra read just slows the client down.',
   schema: z.object({
     from: isoDateTime.describe('Window start (ISO 8601).'),
     to: isoDateTime.describe('Window end (ISO 8601).'),
@@ -119,6 +119,32 @@ type CompanionRecurrence = ReturnType<typeof repeatToFields> | null;
 
 /** A repeat spec → companion recurrence fields, unless it's a pattern our DB
  * cron can't represent (weekly interval>1 WITH weekdays), where it's one-shot. */
+/**
+ * Recover a MEETING's own weekdays from a companion's stored (already-shifted)
+ * ones.
+ *
+ * armEventReminders stores weekdays shifted back by the lead's midnight-crossing
+ * day-delta, so a 10h lead on a Monday 07:00 meeting is stored as Sunday. When an
+ * update rebuilds the companions it must hand armEventReminders the MEETING's
+ * weekdays, because that function applies the shift itself — feeding the stored
+ * value straight back shifted it a SECOND time, moving every ping one more day
+ * earlier on every single edit (Mon meeting → Sat ping, then Fri, …). Undoing the
+ * shift with the companion's OWN lead yields the lead-independent meeting days,
+ * which is also why the result can safely be reused for every other lead.
+ */
+function unshiftCompanionWeekdays(
+  storedWeekdays: number[],
+  leadMinutes: number | null,
+  eventStart: Date,
+  zone: string,
+): number[] {
+  if (storedWeekdays.length === 0 || !leadMinutes || leadMinutes <= 0) return storedWeekdays;
+  const anchor = new Date(eventStart.getTime() - leadMinutes * 60_000);
+  const shift = (localWeekday(eventStart, zone) - localWeekday(anchor, zone) + 7) % 7;
+  if (shift === 0) return storedWeekdays;
+  return storedWeekdays.map((w) => (((w + shift) % 7) + 7) % 7);
+}
+
 function companionRecurrenceFrom(repeat: RepeatInput | undefined): CompanionRecurrence {
   if (!repeat) return null;
   const unsupported =
@@ -338,11 +364,14 @@ export const createCalendarEvent = defineTool({
     // client's reminders — never dependent on the model remembering to ask).
     // Each lead → an independent companion ping.
     const leads = input.reminder_minutes_before ?? ctx.client.reminderLeads;
-    // Remember an explicit "no reminders for this meeting" so the calendar
-    // sweep's auto-arming never silently re-adds pings the client refused.
-    if (input.reminder_minutes_before?.length === 0) {
+    // ANY explicit reminder decision for this meeting — "none", or a narrower
+    // list like "just an hour before" — hands reminder policy to the client and
+    // the sweep must not second-guess it. Marking only the empty case was wrong:
+    // once a custom lead fired, the sweep saw no unsent companion, fell back to
+    // the client's DEFAULT leads, and re-added pings they had explicitly declined.
+    if (input.reminder_minutes_before !== undefined) {
       await ctx.repo
-        .setEventReminderOptOut(event.seriesId ?? event.id, true)
+        .setEventReminderPolicyPinned(event.seriesId ?? event.id, true)
         .catch(() => undefined);
     }
     const companionRec = companionRecurrenceFrom(input.repeat);
@@ -489,12 +518,14 @@ export const updateCalendarEvent = defineTool({
       desiredLeads = existing
         .map((e) => e.reminderLeadMinutes)
         .filter((n): n is number => n != null);
-    // An explicit reminder decision on THIS meeting is remembered, so the sweep's
-    // auto-arming respects it: [] opts the event out; any real list opts back in.
-    if (reminder_minutes_before !== undefined) {
-      await ctx.repo
-        .setEventReminderOptOut(seriesId, reminder_minutes_before.length === 0)
-        .catch(() => undefined);
+    // An explicit reminder decision hands policy to the client and pins it
+    // against the sweep's auto-arming — for ANY list, empty or not.
+    // Gated on touchCompanions: a "just this occurrence" edit must NEVER write a
+    // series-level pin (that silently stopped reminders for every future
+    // occurrence), and it can't honour a per-occurrence lead change either — so
+    // it is reported honestly below instead of being silently swallowed.
+    if (reminder_minutes_before !== undefined && touchCompanions) {
+      await ctx.repo.setEventReminderPolicyPinned(seriesId, true).catch(() => undefined);
     }
     if (touchCompanions && desiredLeads !== undefined) {
       try {
@@ -506,7 +537,15 @@ export const updateCalendarEvent = defineTool({
           ? {
               recurrenceFreq: src.recurrenceFreq,
               recurrenceInterval: src.recurrenceInterval ?? 1,
-              recurrenceWeekdays: src.recurrenceWeekdays,
+              // Undo the stored shift so armEventReminders can re-derive it per
+              // lead; passing the shifted value back would shift it AGAIN and
+              // walk every ping a day earlier on each edit.
+              recurrenceWeekdays: unshiftCompanionWeekdays(
+                src.recurrenceWeekdays,
+                src.reminderLeadMinutes,
+                event.start,
+                src.recurrenceTimezone ?? ctx.client.timezone,
+              ),
               recurrenceUntil: src.recurrenceUntil,
             }
           : null;
@@ -539,6 +578,18 @@ export const updateCalendarEvent = defineTool({
       } catch {
         /* leave the reminder on its old title rather than fail the whole update */
       }
+    }
+    // Reminders are SERIES-level, so a "just this occurrence" edit cannot change
+    // them. Say so instead of returning success with no note — the model would
+    // otherwise confirm a reminder change that never happened.
+    if (!touchCompanions && reminder_minutes_before !== undefined) {
+      reminderNote =
+        " (Reminders are set for the whole repeating meeting, so I couldn't change them for just this one occurrence — tell the client, and ask whether to change the reminder for the entire series.)";
+    } else if (!touchCompanions && timeChanging) {
+      // A single occurrence moved, but its ping is series-level and still fires
+      // at the original time — the client must be told, not left to be surprised.
+      reminderNote =
+        " (Heads up: the reminder is set for the whole repeating meeting, so it still fires at the series' usual time — not before this moved occurrence.)";
     }
     const scopeNote = applyToSeries
       ? ' — applied to the whole recurring series'

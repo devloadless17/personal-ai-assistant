@@ -18,6 +18,10 @@ export const telegramUpdateSchema = z.object({
       chat: z.object({ id: z.number().int(), type: z.string() }),
       from: z.object({ id: z.number().int(), is_bot: z.boolean() }).optional(),
       text: z.string().optional(),
+      // A photo/document sent WITH a caption carries a real request ("book this
+      // for Thursday 3pm"). Parsing it means the request is acted on instead of
+      // being refused as an unsupported type and silently lost.
+      caption: z.string().optional(),
       // Voice notes (OGG/Opus) and forwarded audio files — transcribed to text
       // before they reach the agent. Anything else stays unhandled.
       voice: telegramMediaSchema.optional(),

@@ -48,7 +48,10 @@ export class ClientScopedRepository {
     const cap = Math.min(Math.max(limit, 1), 100);
 
     const dueAtRange: Prisma.DateTimeNullableFilter | undefined =
-      dueFrom || dueTo ? { gte: dueFrom, lte: dueTo } : undefined;
+      // `lt`, not `lte`: callers pass END-of-day as the start of the NEXT day
+      // (endOfTodayInTz), so an inclusive bound listed a task due at tomorrow
+      // 00:00 under "today" — a wrong-day item in the brief and in get_tasks.
+      dueFrom || dueTo ? { gte: dueFrom, lt: dueTo } : undefined;
 
     const where: Prisma.TaskWhereInput = {
       clientId: this.clientId,
@@ -104,16 +107,18 @@ export class ClientScopedRepository {
   }
 
   /**
-   * Record/clear "this meeting should have NO reminders".
+   * Pin/unpin "the client has decided this meeting's reminders themselves".
    *
-   * The calendar sweep auto-arms reminders for meetings the client added
-   * directly in the Google Calendar app. Without this marker it couldn't tell
-   * "never had reminders" from "the client just turned them off", and would
-   * silently re-add pings they cancelled. Set when reminders are explicitly
-   * emptied; cleared the moment reminders are set again.
+   * The calendar sweep auto-arms reminders for meetings added directly in the
+   * Google Calendar app, using the client's DEFAULT leads. This marker tells it
+   * to keep its hands off an event whose reminders the client set explicitly —
+   * whether that decision was "none at all" or a narrower list like "just an
+   * hour before". Marking only the "none" case was a real bug: once a custom
+   * lead had fired there was no unsent companion left, so the sweep fell back to
+   * the defaults and re-added pings the client had explicitly declined.
    */
-  async setEventReminderOptOut(eventId: string, optedOut: boolean): Promise<void> {
-    if (optedOut) {
+  async setEventReminderPolicyPinned(eventId: string, pinned: boolean): Promise<void> {
+    if (pinned) {
       await this.prisma.eventReminderOptOut.upsert({
         where: { clientId_eventId: { clientId: this.clientId, eventId } },
         create: { clientId: this.clientId, eventId },

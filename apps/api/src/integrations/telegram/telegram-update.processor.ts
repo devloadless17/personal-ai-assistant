@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
 import type { Client } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { AgentService } from '../../agent/agent.service';
@@ -46,7 +46,7 @@ function audioExtension(filePath: string, isVoice: boolean): string {
  * shared queue (e.g. BullMQ) — flagged in the README.
  */
 @Injectable()
-export class TelegramUpdateProcessor {
+export class TelegramUpdateProcessor implements OnApplicationShutdown {
   private readonly logger = new Logger(TelegramUpdateProcessor.name);
   private readonly chains = new Map<string, Promise<void>>();
 
@@ -59,6 +59,11 @@ export class TelegramUpdateProcessor {
     private readonly transcription: OpenAiTranscriptionService,
     private readonly timezone: TimezoneService,
   ) {}
+
+  /** Nest calls this on SIGTERM (enableShutdownHooks) — drain before exit. */
+  async onApplicationShutdown(): Promise<void> {
+    await this.drain();
+  }
 
   /** Fire-and-forget from the controller; work is chained per client. */
   enqueue(client: Client, update: TelegramUpdate): void {
@@ -75,6 +80,35 @@ export class TelegramUpdateProcessor {
         if (this.chains.get(client.id) === next) this.chains.delete(client.id);
       });
     this.chains.set(client.id, next);
+  }
+
+  /**
+   * Let in-flight client turns finish before the process exits.
+   *
+   * The webhook acks 200 the instant work is enqueued, so Telegram will NEVER
+   * redeliver. Without this, every redeploy silently vaporised whatever was
+   * mid-flight or queued: the client got no reply, no error, and no record —
+   * just silence, with nothing in diagnostics to show it happened. Bounded so a
+   * wedged turn can't block shutdown indefinitely.
+   */
+  async drain(timeoutMs = 20_000): Promise<void> {
+    const inFlight = [...this.chains.values()];
+    if (inFlight.length === 0) return;
+    this.logger.log(`Draining ${inFlight.length} in-flight client turn(s) before shutdown…`);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(inFlight),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            this.logger.warn(`Drain timed out after ${timeoutMs}ms — exiting with work in flight.`);
+            resolve();
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async process(client: Client, update: TelegramUpdate): Promise<void> {
@@ -210,8 +244,12 @@ export class TelegramUpdateProcessor {
     // Echo-then-act: for voice, prepend what we heard so a mis-hearing is
     // obvious to the client immediately. Store exactly what we sent.
     const outbound = wasVoice ? `🎙️ I heard: “${text}”\n\n${reply}` : reply;
-    await repo.saveMessage({ direction: 'outbound', content: outbound });
+    // SEND, then record — the same ordering every system message uses. Recording
+    // first meant a failed send still left an outbound row, which is then loaded
+    // as conversation history: the model believes it already answered and won't
+    // repeat itself, so the client is left with silence and no way to recover.
     await this.telegram.sendMessage(botToken, chatId, outbound);
+    await repo.saveMessage({ direction: 'outbound', content: outbound });
   }
 
   /**
@@ -229,6 +267,10 @@ export class TelegramUpdateProcessor {
     msg: NonNullable<TelegramUpdate['message']>,
   ): Promise<string | null> {
     if (msg.text) return msg.text;
+    // A caption on a photo/document is the client's actual instruction. We can't
+    // see the attachment, so act on the words and say so rather than dropping
+    // a perfectly actionable request.
+    if (msg.caption?.trim()) return msg.caption.trim();
 
     const media = msg.voice ?? msg.audio;
     if (!media) {

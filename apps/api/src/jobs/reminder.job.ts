@@ -138,12 +138,6 @@ export class ReminderJob implements OnApplicationBootstrap {
 
     const { client } = task;
     try {
-      const botToken = client.telegramBotTokenEnc
-        ? this.crypto.decrypt(client.telegramBotTokenEnc)
-        : null;
-      if (!botToken || !client.telegramChatId) {
-        throw new Error('client has no bot token or bound chat');
-      }
       // Safety net: the ping already prefixes "⏰ Reminder:", so strip a leading
       // "Reminder:"/"Reminder -" the model may have baked into the title (else it
       // reads as a doubled "⏰ Reminder: Reminder: Meeting"). Require an actual
@@ -164,11 +158,9 @@ export class ReminderJob implements OnApplicationBootstrap {
         // fires AT its own time, dueAt == reminderAt → no redundant "(due …)".)
         suffix = ` (due ${formatEventWhen(task.dueAt, now, tz)})`;
       }
-      const text = `⏰ Reminder: ${subject}${suffix}`;
-      await this.telegram.sendMessage(botToken, client.telegramChatId, text);
-      // Record AFTER a confirmed send so the admin log shows exactly what the
-      // client received (never a phantom row for a failed send).
-      await this.notifier.record(client.id, text, 'reminder');
+      // Single choke point: sends, then records — a background sender cannot
+      // deliver to a client without the admin log capturing it.
+      await this.notifier.send(client, `⏰ Reminder: ${subject}${suffix}`, 'reminder');
       // Delivery CONFIRMED — recurring reminders roll forward to their next
       // occurrence; one-shots are marked permanently sent.
       await this.advanceOrComplete(task, client.timezone, now);
