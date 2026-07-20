@@ -1,5 +1,6 @@
 import {
   inclusiveUntil,
+  isDayScaleSpan,
   firstFutureOccurrence,
   formatEventWhen,
   localWeekday,
@@ -207,5 +208,34 @@ describe('inclusiveUntil — a date-only end date includes its own final day', (
   it('leaves an explicit time untouched', () => {
     const until = at('2026-07-31T14:00:00');
     expect(inclusiveUntil(until, TZ).getTime()).toBe(until.getTime());
+  });
+});
+
+describe('isDayScaleSpan — no bedtime pings for all-day items', () => {
+  const TZ = 'Asia/Beirut';
+  const at = (local: string): Date => new Date(withClientOffset(local, TZ));
+
+  /**
+   * Production: a "Personal gathering" booked 00:00–23:59 armed reminders at
+   * 23:00 and 23:50 the PREVIOUS night (60 and 10 min "before" midnight).
+   */
+  it('flags a 00:00–23:59 day booking', () => {
+    expect(isDayScaleSpan(at('2026-07-22T00:00:00'), at('2026-07-22T23:59:00'), TZ)).toBe(true);
+  });
+
+  it('flags a multi-day block', () => {
+    expect(isDayScaleSpan(at('2026-07-22T00:00:00'), at('2026-07-24T00:00:00'), TZ)).toBe(true);
+  });
+
+  it('does NOT flag a normal meeting', () => {
+    expect(isDayScaleSpan(at('2026-07-22T09:00:00'), at('2026-07-22T10:00:00'), TZ)).toBe(false);
+  });
+
+  it('does NOT flag a 24-hour on-call block that starts at 9 AM (leads still useful)', () => {
+    expect(isDayScaleSpan(at('2026-07-22T09:00:00'), at('2026-07-23T09:00:00'), TZ)).toBe(false);
+  });
+
+  it('does NOT flag a SHORT event that merely starts at midnight', () => {
+    expect(isDayScaleSpan(at('2026-07-22T00:00:00'), at('2026-07-22T01:00:00'), TZ)).toBe(false);
   });
 });

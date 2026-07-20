@@ -4,6 +4,7 @@ import type { CalendarEvent, ToolContext } from './tool.types';
 import { repeatBaseSchema, repeatToFields, repeatToRRule, type RepeatInput } from './tasks.tools';
 import {
   firstFutureOccurrence,
+  isDayScaleSpan,
   nextOccurrence,
   formatInTz,
   formatLeads,
@@ -205,6 +206,12 @@ async function armEventReminders(
     (a, b) => b - a, // earliest ping first
   );
   if (positive.length === 0) return '';
+  // An all-day / day-spanning event gets NO lead-based ping: "an hour before"
+  // midnight is 23:00 the night before, so the client is woken at bedtime for
+  // something that runs all of the next day. The daily brief already lists it.
+  if (event.allDay || isDayScaleSpan(eventStart, event.end, pinnedZone ?? ctx.client.timezone)) {
+    return " (It runs all day, so I didn't set a timed reminder — an \"hour before\" would land late the previous night. It'll appear in the daily summary that morning.)";
+  }
   const seriesId = event.seriesId ?? event.id;
   const armed: number[] = [];
   let anyFailed = false;

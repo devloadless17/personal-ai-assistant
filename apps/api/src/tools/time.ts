@@ -86,6 +86,21 @@ export function inclusiveUntil(until: Date, timeZone: string): Date {
   return new Date(withClientOffset(`${local.slice(0, 10)}T23:59:59.999`, timeZone));
 }
 
+/**
+ * A DAY-SCALE span: starts at local midnight and runs essentially the whole day
+ * (e.g. a "Personal gathering" booked 00:00–23:59, or a multi-day block).
+ *
+ * Lead-based reminders are meaningless for these — 60 and 10 minutes "before"
+ * midnight land at 23:00 and 23:50 the PREVIOUS night, which is how a client got
+ * pinged twice at bedtime about an all-day event. Deliberately requires BOTH the
+ * midnight start and the long duration, so a genuine 24-hour on-call block
+ * starting at 9 AM still gets its normal lead-time pings.
+ */
+export function isDayScaleSpan(start: Date, end: Date, timeZone: string): boolean {
+  if (isoInTz(start, timeZone).slice(11, 16) !== '00:00') return false;
+  return (end.getTime() - start.getTime()) / 3_600_000 >= 20;
+}
+
 /** Format a Date in the client's timezone, e.g. "Fri, Jul 18 2026, 3:00 PM". */
 export function formatInTz(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {

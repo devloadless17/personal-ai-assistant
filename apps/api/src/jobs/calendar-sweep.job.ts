@@ -10,7 +10,7 @@ import { TelegramService } from '../integrations/telegram/telegram.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimezoneService } from '../timezone/timezone.service';
 import type { CalendarEvent } from '../tools/tool.types';
-import { formatInTz } from '../tools/time';
+import { formatInTz, isDayScaleSpan } from '../tools/time';
 import { AdminAlertService } from './admin-alert.service';
 import { ClientNotifierService } from './client-notifier.service';
 
@@ -345,7 +345,9 @@ export class CalendarSweepJob implements OnApplicationBootstrap {
 
     const horizonEnd = new Date(now.getTime() + HORIZON_MS);
     const events = (await gateway.listEvents({ from: now, to: horizonEnd, limit: 100 })).filter(
-      (e) => !e.allDay,
+      // Skip all-day AND day-spanning events: a lead-based ping before a midnight
+      // start fires late the previous night, which is not a reminder anyone wants.
+      (e) => !e.allDay && !isDayScaleSpan(e.start, e.end, client.timezone),
     );
     if (events.length === 0) return;
 
