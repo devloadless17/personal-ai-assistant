@@ -256,6 +256,43 @@ describe('AgentService — reliability invariants', () => {
     expect(JSON.stringify(secondCall.messages)).toContain('not connected');
   });
 
+  /**
+   * PRODUCTION REGRESSION (Mohammad Kshour, 2026-07-18): the client asked for
+   * three reminders. The assistant replied "Will ping you Monday at 9 AM …✅" to
+   * all three but called create_task for only the FIRST — the audit log shows no
+   * tool call at all for the other two, and the client was never reminded.
+   * The guard missed it because it matched "I'll ping you" but not the bare
+   * "Will ping you", which is the assistant's most common phrasing.
+   */
+  it('catches "Will ping you …" with NO tool call (bare future form, not just "I\'ll")', async () => {
+    const { repo, state } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [
+        textResponse('Will ping you Monday at 9 AM to pay Hala $150. ✅'),
+        toolUseResponse('create_task', { title: 'Pay Hala $150', type: 'reminder' }),
+        textResponse('Done — reminder set for Monday 9 AM to pay Hala $150.'),
+      ],
+      repo,
+    );
+
+    const reply = await agent.respond(CLIENT);
+
+    expect(createMessage).toHaveBeenCalledTimes(3); // correction was forced
+    expect(state.tasks).toHaveLength(1); // the reminder REALLY exists now
+    expect(reply).toBe('Done — reminder set for Monday 9 AM to pay Hala $150.');
+  });
+
+  it('does NOT correct a question that merely mentions reminding', async () => {
+    const { repo } = makeFakeRepo();
+    const { agent, createMessage } = makeAgent(
+      [textResponse('When would you like me to remind you — morning or evening?')],
+      repo,
+    );
+    const reply = await agent.respond(CLIENT);
+    expect(createMessage).toHaveBeenCalledTimes(1); // no spurious correction
+    expect(reply).toContain('When would you like');
+  });
+
   it('catches a hallucinated confirmation: claim with NO tool call forces a correction', async () => {
     const { repo, state } = makeFakeRepo();
     // 1st: model claims "Added a reminder" but calls NO tool.

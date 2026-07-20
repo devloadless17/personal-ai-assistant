@@ -56,7 +56,15 @@ const COMPLETION_CLAIM = new RegExp(
     "\\bgot it\\b[\\s\\S]{0,40}\\bremind",
     // Impersonal confirmations ("now" optional): "is scheduled", "is/it's on your calendar", "is confirmed".
     "\\breminder(?:'?s)?\\s+(?:is\\s+|has\\s+been\\s+)?set\\b",
-    "\\bi'?ll\\s+(?:remind|ping)\\s+you\\b",
+    // "I'll ping you", "Will remind you", "I will ping you". The bare "Will …"
+    // form is the assistant's MOST COMMON reminder confirmation ("Will ping you
+    // Monday at 9 AM ✅") and was previously missed entirely — so a reminder the
+    // model only *claimed* to create sailed straight past this guard. \\bi'?ll
+    // cannot match inside "Will" (no word boundary after the W), which is why
+    // the alternation below is explicit.
+    "\\b(?:i\\s+will|i'?ll|will)\\s+(?:remind|ping)\\s+you\\b",
+    // "Will send you a reminder", "I'll set a reminder for …"
+    "\\b(?:i\\s+will|i'?ll|will)\\s+(?:send|set)\\b[\\s\\S]{0,20}\\bremind",
     "\\b(is|it'?s)\\s+(?:now\\s+)?(on (?:your|the) calendar|scheduled|booked|set|confirmed|in your (tasks|list))\\b",
   ].join("|"),
   "i",
