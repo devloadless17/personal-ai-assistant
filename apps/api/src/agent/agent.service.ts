@@ -107,6 +107,20 @@ const MUTATION_CLAIM = new RegExp(
   'i',
 );
 
+/**
+ * SEMANTIC backstop to COMPLETION_CLAIM. The regex only knows phrasings we've
+ * already been burned by — a client genuinely lost two reminders because the
+ * assistant wrote "Will ping you Monday at 9 AM ✅" and the pattern only matched
+ * "I'll ping you". Reading the sentence generalises where matching cannot.
+ */
+const CLAIM_CLASSIFIER_SYSTEM = `You check one assistant reply for a specific property. Answer with exactly one word: yes or no.
+
+Answer "yes" if the reply tells the user that something HAS BEEN scheduled, created, saved, changed, moved, cancelled or deleted for them — including a promise that follows from it, like "will ping you Monday at 9" or "you're all set for 3pm", which only makes sense if a reminder or event now exists.
+
+Answer "no" if the reply merely: asks a question, offers or proposes to do something, reports what is already on their schedule without changing it, says it could NOT do something, or is small talk.
+
+Reply with only "yes" or "no".`;
+
 /** Tool-input keys whose values are datetimes (the only fields we anchor). */
 const DATETIME_KEYS = new Set(['due_at', 'reminder_at', 'start', 'end', 'from', 'to', 'until']);
 
@@ -280,7 +294,29 @@ export class AgentService {
       //   (b) a mutating tool ERRORED and the reply doesn't own up to it
       //       (catches "Added A and deleted B" when B failed).
       const text = this.extractText(response);
-      const claimsCompletion = text ? COMPLETION_CLAIM.test(text) : false;
+      let claimsCompletion = text ? COMPLETION_CLAIM.test(text) : false;
+      // RISK WINDOW: the reply says something substantive, the pattern saw no
+      // claim, and NO mutation ran this turn. That is exactly where a novel
+      // phrasing slips a fabricated confirmation past the guard, so pay for a
+      // cheap second opinion. Everywhere else costs nothing: a turn that really
+      // mutated needs no check, and a short/greeting reply can't be a claim.
+      if (
+        !claimsCompletion &&
+        text.trim().length > 15 &&
+        !successfulMutation &&
+        !mutationError
+      ) {
+        const judged = await this.anthropic.classifyYesNo({
+          system: CLAIM_CLASSIFIER_SYSTEM,
+          input: text,
+        });
+        if (judged === true) {
+          claimsCompletion = true;
+          this.logger.warn(
+            `Client ${ctx.client.id}: fabrication backstop caught a claim the pattern missed`,
+          );
+        }
+      }
       // A turn where ONLY read tools ran (no mutation attempted) is a status /
       // read-back answer ("yes, your reminder IS set for 9:30") grounded in that
       // read — never force a correction on it, or we'd push a duplicate mutation.

@@ -1,6 +1,11 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Client } from '@prisma/client';
 import { AgentService } from './agent.service';
+
+/** Mirror of the production COMPLETION_CLAIM start-anchors, used only to prove a
+ * phrasing genuinely evades the pattern so the backstop test is meaningful. */
+const COMPLETION_CLAIM_FOR_TEST =
+  /^\s*(added|created|booked|scheduled|done|set)\b|\bi(?:'ve| have)?\s+(added|created|booked|set)\b|\b(?:i\s+will|i'?ll|will)\s+(?:remind|ping)\s+you\b|\b(all (done|set)|you'?re all (set|booked))\b/i;
 import type { AnthropicService } from '../integrations/anthropic/anthropic.service';
 import type { TenancyService } from '../tenancy/tenancy.service';
 import type { ClientScopedRepository } from '../tenancy/client-scoped-repository';
@@ -124,16 +129,27 @@ function toolUseResponse(
 function makeAgent(
   responses: Anthropic.Message[],
   repo: ClientScopedRepository,
-): { agent: AgentService; createMessage: jest.Mock<Promise<Anthropic.Message>, unknown[]> } {
+  /** Verdict from the semantic fabrication backstop. null = "no opinion", which
+   * is also how a real classifier failure behaves (fail-open to the regex). */
+  claimVerdict: boolean | null = null,
+): {
+  agent: AgentService;
+  createMessage: jest.Mock<Promise<Anthropic.Message>, unknown[]>;
+  classifyYesNo: jest.Mock<Promise<boolean | null>, unknown[]>;
+} {
   const createMessage = jest.fn<Promise<Anthropic.Message>, unknown[]>();
   for (const r of responses) createMessage.mockResolvedValueOnce(r);
+  const classifyYesNo = jest
+    .fn<Promise<boolean | null>, unknown[]>()
+    .mockResolvedValue(claimVerdict);
   const anthropic = {
     isConfigured: true,
     model: 'claude-opus-4-8',
     createMessage,
+    classifyYesNo,
   } as unknown as AnthropicService;
   const tenancy = { repoFor: () => repo } as unknown as TenancyService;
-  return { agent: new AgentService(anthropic, tenancy), createMessage };
+  return { agent: new AgentService(anthropic, tenancy), createMessage, classifyYesNo };
 }
 
 describe('AgentService — reliability invariants', () => {
@@ -280,6 +296,50 @@ describe('AgentService — reliability invariants', () => {
     expect(createMessage).toHaveBeenCalledTimes(3); // correction was forced
     expect(state.tasks).toHaveLength(1); // the reminder REALLY exists now
     expect(reply).toBe('Done — reminder set for Monday 9 AM to pay Hala $150.');
+  });
+
+  /**
+   * The regex only knows phrasings we've already been burned by. This is the
+   * generalisation: an invented confirmation worded in a way NO pattern covers
+   * must still be caught, because a small model reads the sentence rather than
+   * matching it.
+   */
+  it('semantic backstop catches an invented confirmation the pattern cannot match', async () => {
+    const { repo, state } = makeFakeRepo();
+    const novel = 'Consider it handled — your dentist visit is locked in for Tuesday at 4.';
+    // Sanity: this phrasing genuinely evades the regex, so the test proves the
+    // backstop (not the pattern) is what saves us.
+    expect(COMPLETION_CLAIM_FOR_TEST.test(novel)).toBe(false);
+
+    const { agent, createMessage, classifyYesNo } = makeAgent(
+      [
+        textResponse(novel),
+        toolUseResponse('create_task', { title: 'Dentist', type: 'reminder' }),
+        textResponse('Done — reminder set for Tuesday at 4 PM.'),
+      ],
+      repo,
+      true, // classifier: yes, this asserts a completed action
+    );
+
+    const reply = await agent.respond(CLIENT);
+
+    expect(classifyYesNo).toHaveBeenCalled();
+    expect(createMessage).toHaveBeenCalledTimes(3); // correction forced
+    expect(state.tasks).toHaveLength(1); // and the reminder REALLY exists
+    expect(reply).toBe('Done — reminder set for Tuesday at 4 PM.');
+  });
+
+  it('a turn that really mutated never pays for the backstop call', async () => {
+    const { repo } = makeFakeRepo();
+    const { agent, classifyYesNo } = makeAgent(
+      [
+        toolUseResponse('create_task', { title: 'Pay rent', type: 'reminder' }),
+        textResponse('Added — reminder set.'),
+      ],
+      repo,
+    );
+    await agent.respond(CLIENT);
+    expect(classifyYesNo).not.toHaveBeenCalled(); // no cost on the happy path
   });
 
   it('does NOT correct a question that merely mentions reminding', async () => {
